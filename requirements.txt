@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+requests
+folium
+streamlit-folium
+shapely
+pyogrio
+pystac-client
+planetary-computer
+xarray
+stackstac
+matplotlib
