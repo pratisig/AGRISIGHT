@@ -1,6 +1,6 @@
 # ============================================================
-# AGRISIGHT – DASHBOARD AVANCEE (VERSION CORRIGEE)
-# Prévention des erreurs si données manquantes
+# AGRISIGHT – DASHBOARD AVANCEE COMPLET
+# Version Streamlit interactive avec NDVI, climat, rendement, PDF
 # ============================================================
 
 import streamlit as st
@@ -145,7 +145,7 @@ with tabs[1]:
 # --------------------
 with tabs[3]:
     st.subheader("🌾 Rendement potentiel")
-    if not climate_daily.empty and not ndvi_timeseries.empty:
+    if 'climate_daily' in locals() and not climate_daily.empty and 'ndvi_timeseries' in locals() and not ndvi_timeseries.empty:
         ndvi_mean = ndvi_timeseries['ndvi_mean'].mean()
         rain_total = climate_daily['PRECTOT']['mean'].sum()
         temp_mean = climate_daily['T2M']['mean'].mean()
@@ -173,8 +173,8 @@ with tabs[4]:
         pdf.set_font("Arial","",12)
         pdf.cell(0,10,f"Culture : {culture}",0,1)
         pdf.cell(0,10,f"Période : {start_date} à {end_date}",0,1)
-        if not climate_daily.empty: pdf.cell(0,10,f"Pluviométrie totale : {rain_total:.1f} mm",0,1)
-        if not ndvi_timeseries.empty: pdf.cell(0,10,f"NDVI moyen : {ndvi_mean:.2f}",0,1)
+        if 'climate_daily' in locals() and not climate_daily.empty: pdf.cell(0,10,f"Pluviométrie totale : {rain_total:.1f} mm",0,1)
+        if 'ndvi_timeseries' in locals() and not ndvi_timeseries.empty: pdf.cell(0,10,f"NDVI moyen : {ndvi_mean:.2f}",0,1)
         if 'yield_potential' in locals(): pdf.cell(0,10,f"Rendement potentiel : {round(yield_potential,2)} t/ha",0,1)
         pdf_file = "agrisight_dashboard_rapport.pdf"
         pdf.output(pdf_file)
