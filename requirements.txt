@@ -13,3 +13,4 @@ xarray
 stackstac
 matplotlib
 fpdf 
+openai
