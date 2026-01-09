@@ -6,6 +6,7 @@ folium
 streamlit-folium
 shapely
 pyogrio
+geopandas
 pystac-client
 planetary-computer
 xarray
