@@ -6,97 +6,229 @@ import requests
 import folium
 from folium.plugins import Draw, MeasureControl
 from streamlit_folium import st_folium
-from shapely.geometry import Point, mapping
+from shapely.geometry import Point, Polygon, mapping
 from datetime import date, datetime, timedelta
 import matplotlib.pyplot as plt
 import seaborn as sns
 from io import BytesIO
 import json
+from matplotlib.backends.backend_pdf import PdfPages
+import base64
 
 # Configuration
-st.set_page_config(page_title="AgriSight IA", layout="wide")
+st.set_page_config(page_title="AgriSight IA", layout="wide", page_icon="🌾")
 
-# Style CSS personnalisé
+# CSS personnalisé
 st.markdown("""
 <style>
-    .stAlert {border-radius: 10px;}
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-    }
+    .big-metric {font-size: 2em; font-weight: bold; color: #2E7D32;}
+    .alert-box {background: #FFF3CD; padding: 15px; border-radius: 8px; border-left: 4px solid #FFC107;}
+    .success-box {background: #D4EDDA; padding: 15px; border-radius: 8px; border-left: 4px solid #28A745;}
+    .info-box {background: #D1ECF1; padding: 15px; border-radius: 8px; border-left: 4px solid #17A2B8;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🌾 AgriSight – Analyse Agro-climatique et Végétative Optimisée")
+st.title("🌾 AgriSight Pro - Analyse Agro-climatique Avancée")
+st.markdown("*Plateforme d'analyse par télédétection et IA pour l'agriculture de précision*")
 
 # --------------------
-# SIDEBAR
+# SIDEBAR CONFIGURATION
 # --------------------
-st.sidebar.header("📂 Paramètres")
+st.sidebar.header("⚙️ Configuration")
+st.sidebar.markdown("---")
 
-# Option 1: Upload fichier
-uploaded_file = st.sidebar.file_uploader("Importer une zone (GeoJSON)", type=["geojson"])
+# API Keys (stockées en session state pour sécurité)
+with st.sidebar.expander("🔑 Clés API (Optionnel)", expanded=False):
+    st.markdown("""
+    **OpenWeather Agromonitoring** (Gratuit - 1000 appels/jour)
+    - Inscription: [agromonitoring.com](https://agromonitoring.com)
+    - NDVI, EVI, NDWI, Images satellite réelles
+    """)
+    agromonitoring_key = st.text_input("Clé Agromonitoring", type="password", 
+                                      help="Laissez vide pour mode démo simulé")
+    
+    st.markdown("""
+    **Ollama (Local - Gratuit)** 
+    - Installation: [ollama.com](https://ollama.com)
+    - Modèles: llama3, mistral, gemma
+    - Fonctionne hors ligne
+    """)
+    use_ollama = st.checkbox("Utiliser Ollama (IA locale)", value=False)
+    ollama_url = st.text_input("URL Ollama", value="http://localhost:11434", 
+                               help="URL de votre serveur Ollama local")
+    ollama_model = st.selectbox("Modèle Ollama", 
+                                ["llama3.2", "mistral", "gemma2:2b", "phi3"],
+                                help="Modèle à utiliser pour l'analyse")
 
-# Option 2: Coordonnées manuelles (OPTIMISATION)
-st.sidebar.subheader("OU entrer les coordonnées")
-manual_lat = st.sidebar.number_input("Latitude", value=14.6937, format="%.4f")
-manual_lon = st.sidebar.number_input("Longitude", value=-17.4441, format="%.4f")
-use_manual = st.sidebar.checkbox("Utiliser les coordonnées manuelles")
+st.sidebar.markdown("---")
 
-# Dates (OPTIMISATION: limiter la période)
+# Zone d'étude
+st.sidebar.subheader("📍 Zone d'étude")
+zone_method = st.sidebar.radio("Méthode de sélection", 
+                               ["📂 Importer GeoJSON", "✏️ Dessiner sur carte", "📌 Coordonnées"])
+
+uploaded_file = None
+manual_coords = None
+
+if zone_method == "📂 Importer GeoJSON":
+    uploaded_file = st.sidebar.file_uploader("Fichier GeoJSON", type=["geojson", "json"])
+elif zone_method == "📌 Coordonnées":
+    st.sidebar.info("Entrez les coins d'un rectangle (min/max)")
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        lat_min = st.number_input("Lat Min", value=14.60, format="%.4f")
+        lon_min = st.number_input("Lon Min", value=-17.50, format="%.4f")
+    with col2:
+        lat_max = st.number_input("Lat Max", value=14.70, format="%.4f")
+        lon_max = st.number_input("Lon Max", value=-17.40, format="%.4f")
+    manual_coords = (lat_min, lon_min, lat_max, lon_max)
+
+# Paramètres temporels
+st.sidebar.subheader("📅 Période d'analyse")
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    start_date = st.date_input("Date début", date.today() - timedelta(days=90))
+    start_date = st.date_input("Début", date.today() - timedelta(days=60))
 with col2:
-    end_date = st.date_input("Date fin", date.today())
+    end_date = st.date_input("Fin", date.today())
 
-# Vérifier que la période n'excède pas 120 jours (OPTIMISATION)
-date_diff = (end_date - start_date).days
-if date_diff > 120:
-    st.sidebar.warning("⚠️ Période limitée à 120 jours pour éviter les timeouts")
-    end_date = start_date + timedelta(days=120)
+# Limiter à 90 jours
+if (end_date - start_date).days > 90:
+    st.sidebar.warning("⚠️ Période limitée à 90 jours")
+    end_date = start_date + timedelta(days=90)
 
-culture = st.sidebar.selectbox("Type de culture", 
-    ["Mil", "Sorgho", "Maïs", "Arachide", "Papayer", "Riz", "Niébé", "Manioc"])
+# Type de culture
+culture = st.sidebar.selectbox("🌱 Type de culture", 
+    ["Mil", "Sorgho", "Maïs", "Arachide", "Riz", "Niébé", "Manioc", "Tomate", "Oignon", "Papayer"])
 
-# Bouton de chargement
-load_data = st.sidebar.button("📥 Charger les données", type="primary")
+# Zone géographique
+zone_name = st.sidebar.text_input("📍 Nom de la zone", "Ma parcelle")
+
+st.sidebar.markdown("---")
+load_btn = st.sidebar.button("🚀 Lancer l'analyse", type="primary", use_container_width=True)
 
 # --------------------
 # SESSION STATE
 # --------------------
+if 'polygon_id' not in st.session_state:
+    st.session_state.polygon_id = None
 if 'gdf' not in st.session_state:
     st.session_state.gdf = None
+if 'satellite_data' not in st.session_state:
+    st.session_state.satellite_data = None
 if 'climate_data' not in st.session_state:
     st.session_state.climate_data = None
-if 'ndvi_data' not in st.session_state:
-    st.session_state.ndvi_data = None
-if 'analysis_result' not in st.session_state:
-    st.session_state.analysis_result = None
+if 'analysis' not in st.session_state:
+    st.session_state.analysis = None
 
 # --------------------
-# FONCTIONS OPTIMISÉES
+# FONCTIONS UTILITAIRES
 # --------------------
+
+def create_polygon_from_coords(lat_min, lon_min, lat_max, lon_max):
+    """Crée un polygone à partir de coordonnées bbox"""
+    coords = [
+        (lon_min, lat_min),
+        (lon_max, lat_min),
+        (lon_max, lat_max),
+        (lon_min, lat_max),
+        (lon_min, lat_min)
+    ]
+    return Polygon(coords)
 
 @st.cache_data(ttl=3600)
-def load_zone(file_bytes):
-    """Charge un fichier GeoJSON avec cache"""
+def load_geojson(file_bytes):
+    """Charge un GeoJSON avec cache"""
     try:
         gdf = gpd.read_file(BytesIO(file_bytes))
         return gdf.to_crs(4326)
     except Exception as e:
-        st.error(f"Erreur de chargement: {e}")
+        st.error(f"Erreur lecture GeoJSON: {e}")
+        return None
+
+def register_polygon_agro(geometry, api_key):
+    """Enregistre un polygone sur Agromonitoring API"""
+    if not api_key:
+        return None
+    
+    try:
+        coords = list(mapping(geometry)['coordinates'][0])
+        
+        url = f"http://api.agromonitoring.com/agro/1.0/polygons?appid={api_key}"
+        payload = {
+            "name": "parcelle_temp",
+            "geo_json": {
+                "type": "Feature",
+                "properties": {},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [coords]
+                }
+            }
+        }
+        
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code == 201:
+            return response.json()['id']
+        else:
+            st.warning(f"Erreur enregistrement polygone: {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"Erreur API Agromonitoring: {e}")
         return None
 
 @st.cache_data(ttl=3600)
-def get_climate_data_optimized(lat, lon, start, end):
-    """
-    Récupère les données climatiques NASA POWER
-    OPTIMISATION: Un seul point, pas d'échantillonnage multiple
-    """
+def get_satellite_imagery_agro(polygon_id, api_key, start, end):
+    """Récupère les données satellite via Agromonitoring"""
+    if not polygon_id or not api_key:
+        return None
+    
+    try:
+        start_ts = int(datetime.combine(start, datetime.min.time()).timestamp())
+        end_ts = int(datetime.combine(end, datetime.max.time()).timestamp())
+        
+        url = f"http://api.agromonitoring.com/agro/1.0/ndvi/history?polyid={polygon_id}&start={start_ts}&end={end_ts}&appid={api_key}"
+        
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            
+            if not data:
+                return None
+            
+            # Parser les données
+            results = []
+            for item in data:
+                dt = datetime.fromtimestamp(item['dt'])
+                
+                # Récupérer les stats NDVI si disponibles
+                stats_url = item.get('data', {}).get('std')
+                if stats_url:
+                    stats_response = requests.get(f"{stats_url}?appid={api_key}", timeout=10)
+                    if stats_response.status_code == 200:
+                        stats = stats_response.json()
+                        results.append({
+                            'date': dt,
+                            'ndvi_mean': stats.get('mean', np.nan),
+                            'ndvi_std': stats.get('std', np.nan),
+                            'ndvi_min': stats.get('min', np.nan),
+                            'ndvi_max': stats.get('max', np.nan),
+                            'cloud_cover': item.get('cl', 0)
+                        })
+            
+            return pd.DataFrame(results) if results else None
+        else:
+            st.warning(f"Pas de données satellite disponibles (code {response.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Erreur récupération satellite: {e}")
+        return None
+
+@st.cache_data(ttl=3600)
+def get_climate_nasa_polygon(geometry, start, end):
+    """Récupère les données climatiques NASA POWER pour un polygone (centroïde)"""
+    centroid = geometry.centroid
+    lat, lon = centroid.y, centroid.x
+    
     url = (
         "https://power.larc.nasa.gov/api/temporal/daily/point"
         f"?parameters=T2M,T2M_MIN,T2M_MAX,PRECTOTCORR"
@@ -105,467 +237,378 @@ def get_climate_data_optimized(lat, lon, start, end):
     )
     
     try:
-        with st.spinner("🌍 Récupération données climatiques..."):
-            r = requests.get(url, timeout=30)
-            if r.status_code != 200:
-                return None
-            
-            data = r.json()
-            params = data.get("properties", {}).get("parameter", {})
-            
-            df = pd.DataFrame({
-                'date': pd.to_datetime(list(params.get('T2M', {}).keys())),
-                'temp_mean': list(params.get('T2M', {}).values()),
-                'temp_min': list(params.get('T2M_MIN', {}).values()),
-                'temp_max': list(params.get('T2M_MAX', {}).values()),
-                'rain': list(params.get('PRECTOTCORR', {}).values())
-            })
-            
-            return df
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return None
+        
+        data = response.json()
+        params = data.get("properties", {}).get("parameter", {})
+        
+        df = pd.DataFrame({
+            'date': pd.to_datetime(list(params.get('T2M', {}).keys())),
+            'temp_mean': list(params.get('T2M', {}).values()),
+            'temp_min': list(params.get('T2M_MIN', {}).values()),
+            'temp_max': list(params.get('T2M_MAX', {}).values()),
+            'rain': list(params.get('PRECTOTCORR', {}).values())
+        })
+        
+        return df
     except Exception as e:
         st.error(f"Erreur NASA POWER: {e}")
         return None
 
-@st.cache_data(ttl=3600)
-def get_ndvi_mock(lat, lon, start, end):
-    """
-    OPTIMISATION: Génère des données NDVI simulées basées sur la saison
-    Pour production réelle: utiliser Google Earth Engine ou API Sentinel Hub
-    """
-    dates = pd.date_range(start, end, freq='10D')
+def simulate_ndvi_data(start, end):
+    """Génère des données NDVI simulées réalistes (fallback)"""
+    dates = pd.date_range(start, end, freq='5D')
     ndvi_values = []
     
     for d in dates:
-        # Simuler NDVI basé sur le mois (saison des pluies)
         month = d.month
-        if 6 <= month <= 9:  # Saison des pluies
-            base_ndvi = 0.6 + np.random.normal(0, 0.1)
+        # Simuler selon saison
+        if 6 <= month <= 9:  # Saison pluies
+            base = 0.65 + np.random.normal(0, 0.08)
         elif month in [5, 10]:  # Transition
-            base_ndvi = 0.4 + np.random.normal(0, 0.1)
+            base = 0.45 + np.random.normal(0, 0.1)
         else:  # Saison sèche
-            base_ndvi = 0.2 + np.random.normal(0, 0.05)
+            base = 0.25 + np.random.normal(0, 0.06)
         
-        ndvi_values.append(np.clip(base_ndvi, 0, 1))
+        ndvi_values.append({
+            'date': d,
+            'ndvi_mean': np.clip(base, 0, 1),
+            'ndvi_std': 0.1,
+            'ndvi_min': max(0, np.clip(base - 0.15, 0, 1)),
+            'ndvi_max': min(1, np.clip(base + 0.15, 0, 1)),
+            'cloud_cover': np.random.randint(0, 30)
+        })
     
-    return pd.DataFrame({'date': dates, 'ndvi': ndvi_values})
+    return pd.DataFrame(ndvi_values)
 
-def calculate_metrics(climate_df, ndvi_df):
-    """Calcule les métriques agrégées"""
-    if climate_df is None or ndvi_df is None:
+def analyze_with_ollama(prompt, url, model):
+    """Analyse avec Ollama (IA locale)"""
+    try:
+        response = requests.post(
+            f"{url}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            return response.json()['response']
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Erreur Ollama: {e}. Vérifiez que Ollama est démarré.")
+        return None
+
+def calculate_metrics(climate_df, ndvi_df, culture):
+    """Calcule les métriques agrégées et le rendement estimé"""
+    if climate_df is None or ndvi_df is None or climate_df.empty or ndvi_df.empty:
         return {}
     
     metrics = {
-        'ndvi_mean': ndvi_df['ndvi'].mean() if not ndvi_df.empty else 0,
-        'temp_mean': climate_df['temp_mean'].mean() if not climate_df.empty else 0,
-        'temp_min': climate_df['temp_min'].min() if not climate_df.empty else 0,
-        'temp_max': climate_df['temp_max'].max() if not climate_df.empty else 0,
-        'rain_total': climate_df['rain'].sum() if not climate_df.empty else 0,
-        'rain_mean': climate_df['rain'].mean() if not climate_df.empty else 0
+        'ndvi_mean': ndvi_df['ndvi_mean'].mean(),
+        'ndvi_std': ndvi_df['ndvi_mean'].std(),
+        'temp_mean': climate_df['temp_mean'].mean(),
+        'temp_min': climate_df['temp_min'].min(),
+        'temp_max': climate_df['temp_max'].max(),
+        'rain_total': climate_df['rain'].sum(),
+        'rain_mean': climate_df['rain'].mean(),
+        'rain_days': (climate_df['rain'] > 1).sum()
     }
     
-    # Estimation rendement basique (à améliorer)
-    if metrics['ndvi_mean'] > 0.6 and metrics['rain_total'] > 400:
-        metrics['yield_potential'] = 2.5
-    elif metrics['ndvi_mean'] > 0.4 and metrics['rain_total'] > 300:
-        metrics['yield_potential'] = 1.8
-    else:
-        metrics['yield_potential'] = 1.0
+    # Estimation rendement selon culture et conditions
+    ndvi = metrics['ndvi_mean']
+    rain = metrics['rain_total']
+    
+    # Modèles simplifiés de rendement par culture
+    if culture == "Mil":
+        if ndvi > 0.6 and rain > 400:
+            metrics['yield_potential'] = 1.5
+        elif ndvi > 0.4 and rain > 300:
+            metrics['yield_potential'] = 1.0
+        else:
+            metrics['yield_potential'] = 0.6
+    elif culture == "Maïs":
+        if ndvi > 0.65 and rain > 500:
+            metrics['yield_potential'] = 3.5
+        elif ndvi > 0.5 and rain > 400:
+            metrics['yield_potential'] = 2.5
+        else:
+            metrics['yield_potential'] = 1.5
+    elif culture == "Arachide":
+        if ndvi > 0.6 and rain > 450:
+            metrics['yield_potential'] = 2.0
+        elif ndvi > 0.45 and rain > 350:
+            metrics['yield_potential'] = 1.3
+        else:
+            metrics['yield_potential'] = 0.8
+    else:  # Défaut
+        if ndvi > 0.6 and rain > 400:
+            metrics['yield_potential'] = 2.5
+        elif ndvi > 0.4 and rain > 300:
+            metrics['yield_potential'] = 1.8
+        else:
+            metrics['yield_potential'] = 1.0
     
     return metrics
+
+def generate_pdf_report(gdf, climate_df, ndvi_df, metrics, culture, zone_name, analysis_text):
+    """Génère un rapport PDF complet"""
+    buffer = BytesIO()
+    
+    with PdfPages(buffer) as pdf:
+        # Page 1: Carte et infos générales
+        fig = plt.figure(figsize=(11, 8.5))
+        
+        # Titre
+        fig.suptitle(f"Rapport d'Analyse Agricole - {zone_name}", 
+                    fontsize=18, fontweight='bold', y=0.98)
+        
+        # Informations générales
+        ax_info = fig.add_subplot(3, 2, 1)
+        ax_info.axis('off')
+        info_text = f"""
+        Culture: {culture}
+        Zone: {zone_name}
+        Date d'analyse: {datetime.now().strftime('%d/%m/%Y')}
+        Période: {climate_df['date'].min().strftime('%d/%m/%Y')} - {climate_df['date'].max().strftime('%d/%m/%Y')}
+        
+        Superficie: {gdf.geometry.area.sum():.2f} ha
+        """
+        ax_info.text(0.1, 0.5, info_text, fontsize=10, verticalalignment='center')
+        
+        # Métriques clés
+        ax_metrics = fig.add_subplot(3, 2, 2)
+        ax_metrics.axis('off')
+        metrics_text = f"""
+        📊 INDICATEURS CLÉS
+        
+        NDVI moyen: {metrics['ndvi_mean']:.3f}
+        Température moy: {metrics['temp_mean']:.1f}°C
+        Pluviométrie totale: {metrics['rain_total']:.0f} mm
+        Rendement estimé: {metrics['yield_potential']:.1f} t/ha
+        """
+        ax_metrics.text(0.1, 0.5, metrics_text, fontsize=10, verticalalignment='center',
+                       bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.3))
+        
+        # Graphique NDVI
+        ax_ndvi = fig.add_subplot(3, 2, (3, 4))
+        ax_ndvi.plot(ndvi_df['date'], ndvi_df['ndvi_mean'], 'o-', color='green', linewidth=2)
+        ax_ndvi.fill_between(ndvi_df['date'], ndvi_df['ndvi_mean'], alpha=0.3, color='green')
+        ax_ndvi.set_title('Évolution NDVI', fontsize=12, fontweight='bold')
+        ax_ndvi.set_ylabel('NDVI')
+        ax_ndvi.grid(True, alpha=0.3)
+        ax_ndvi.set_ylim([0, 1])
+        
+        # Graphique Climat
+        ax_climate = fig.add_subplot(3, 2, (5, 6))
+        ax_temp = ax_climate.twinx()
+        
+        ax_climate.bar(climate_df['date'], climate_df['rain'], color='blue', alpha=0.4, label='Pluie')
+        ax_temp.plot(climate_df['date'], climate_df['temp_mean'], color='red', linewidth=2, label='Temp')
+        
+        ax_climate.set_xlabel('Date')
+        ax_climate.set_ylabel('Pluie (mm)', color='blue')
+        ax_temp.set_ylabel('Température (°C)', color='red')
+        ax_climate.legend(loc='upper left')
+        ax_temp.legend(loc='upper right')
+        ax_climate.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close()
+        
+        # Page 2: Analyse et recommandations
+        if analysis_text:
+            fig2 = plt.figure(figsize=(11, 8.5))
+            ax_analysis = fig2.add_subplot(111)
+            ax_analysis.axis('off')
+            
+            # Formatter le texte pour le PDF
+            wrapped_text = "\n".join([line[:90] for line in analysis_text.split('\n')])
+            ax_analysis.text(0.05, 0.95, wrapped_text, 
+                           fontsize=9, verticalalignment='top',
+                           wrap=True, family='monospace')
+            
+            pdf.savefig(fig2, bbox_inches='tight')
+            plt.close()
+    
+    buffer.seek(0)
+    return buffer
 
 # --------------------
 # CHARGEMENT DES DONNÉES
 # --------------------
-if uploaded_file:
-    file_bytes = uploaded_file.read()
-    st.session_state.gdf = load_zone(file_bytes)
 
-if load_data:
-    with st.spinner("⏳ Chargement en cours..."):
-        # Déterminer les coordonnées
-        if use_manual:
-            lat, lon = manual_lat, manual_lon
-        elif st.session_state.gdf is not None:
-            centroid = st.session_state.gdf.geometry.centroid.iloc[0]
-            lat, lon = centroid.y, centroid.x
-        else:
-            st.error("Veuillez importer une zone ou activer les coordonnées manuelles")
+if load_btn:
+    with st.spinner("🔄 Chargement et analyse en cours..."):
+        
+        # 1. Déterminer la géométrie
+        geometry = None
+        
+        if zone_method == "📂 Importer GeoJSON" and uploaded_file:
+            file_bytes = uploaded_file.read()
+            gdf = load_geojson(file_bytes)
+            if gdf is not None and not gdf.empty:
+                st.session_state.gdf = gdf
+                geometry = gdf.geometry.unary_union
+        
+        elif zone_method == "📌 Coordonnées" and manual_coords:
+            polygon = create_polygon_from_coords(*manual_coords)
+            gdf = gpd.GeoDataFrame([{'geometry': polygon}], crs='EPSG:4326')
+            st.session_state.gdf = gdf
+            geometry = polygon
+        
+        elif zone_method == "✏️ Dessiner sur carte":
+            st.info("Utilisez l'outil de dessin sur la carte ci-dessous, puis relancez l'analyse")
+        
+        if geometry is None:
+            st.error("❌ Veuillez définir une zone d'étude")
             st.stop()
         
-        # Charger climat (1 seul point)
-        climate_df = get_climate_data_optimized(lat, lon, start_date, end_date)
+        # 2. Enregistrer le polygone (si API key fournie)
+        if agromonitoring_key:
+            polygon_id = register_polygon_agro(geometry, agromonitoring_key)
+            st.session_state.polygon_id = polygon_id
+        
+        # 3. Récupérer données satellite
+        satellite_df = None
+        
+        if agromonitoring_key and st.session_state.polygon_id:
+            with st.spinner("📡 Récupération images satellite..."):
+                satellite_df = get_satellite_imagery_agro(
+                    st.session_state.polygon_id, 
+                    agromonitoring_key, 
+                    start_date, 
+                    end_date
+                )
+        
+        # Fallback: données simulées si pas d'API
+        if satellite_df is None or satellite_df.empty:
+            st.warning("⚠️ Utilisation de données NDVI simulées (API non configurée)")
+            satellite_df = simulate_ndvi_data(start_date, end_date)
+        
+        st.session_state.satellite_data = satellite_df
+        
+        # 4. Récupérer données climatiques
+        with st.spinner("🌦️ Récupération données climatiques..."):
+            climate_df = get_climate_nasa_polygon(geometry, start_date, end_date)
+        
         st.session_state.climate_data = climate_df
         
-        # Charger NDVI (simulé pour éviter timeout)
-        ndvi_df = get_ndvi_mock(lat, lon, start_date, end_date)
-        st.session_state.ndvi_data = ndvi_df
+        if climate_df is None or climate_df.empty:
+            st.error("❌ Échec récupération données climatiques")
+            st.stop()
         
-        if climate_df is not None:
-            st.success("✅ Données chargées avec succès!")
-        else:
-            st.error("❌ Échec du chargement")
+        st.success("✅ Données chargées avec succès!")
 
 # --------------------
-# ONGLETS
+# ONGLETS PRINCIPAUX
 # --------------------
-tabs = st.tabs(["📊 Vue d'ensemble", "🗺️ Carte", "🛰️ NDVI", "🌦️ Climat", "🤖 Analyse IA", "📄 Rapport"])
+
+tabs = st.tabs(["📊 Vue d'ensemble", "🗺️ Carte Interactive", "🛰️ NDVI", 
+                "🌦️ Climat", "🤖 Analyse IA", "📄 Rapport PDF"])
 
 # --------------------
-# ONGLET VUE D'ENSEMBLE
+# ONGLET 1: VUE D'ENSEMBLE
 # --------------------
 with tabs[0]:
-    st.subheader("📊 Tableau de bord")
+    st.subheader("📊 Tableau de Bord Synthétique")
     
-    if st.session_state.climate_data is not None and st.session_state.ndvi_data is not None:
-        metrics = calculate_metrics(st.session_state.climate_data, st.session_state.ndvi_data)
+    if st.session_state.climate_data is not None and st.session_state.satellite_data is not None:
+        metrics = calculate_metrics(
+            st.session_state.climate_data, 
+            st.session_state.satellite_data,
+            culture
+        )
         
+        # Métriques principales
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("🌱 NDVI Moyen", f"{metrics['ndvi_mean']:.2f}", 
-                     delta="Santé végétale")
+            delta_ndvi = "Bon" if metrics['ndvi_mean'] > 0.5 else "Faible"
+            st.metric("🌱 NDVI Moyen", f"{metrics['ndvi_mean']:.3f}", delta=delta_ndvi)
+        
         with col2:
             st.metric("🌡️ Température Moy.", f"{metrics['temp_mean']:.1f}°C",
-                     delta=f"{metrics['temp_min']:.1f} - {metrics['temp_max']:.1f}°C")
+                     delta=f"{metrics['temp_min']:.0f}° - {metrics['temp_max']:.0f}°")
+        
         with col3:
-            st.metric("💧 Pluie Totale", f"{metrics['rain_total']:.0f} mm",
-                     delta=f"{metrics['rain_mean']:.1f} mm/jour")
+            delta_rain = "Suffisant" if metrics['rain_total'] > 300 else "Insuffisant"
+            st.metric("💧 Pluie Totale", f"{metrics['rain_total']:.0f} mm", delta=delta_rain)
+        
         with col4:
-            st.metric("📈 Rendement Estimé", f"{metrics['yield_potential']:.1f} t/ha",
-                     delta="Potentiel")
+            st.metric("📈 Rendement Estimé", f"{metrics['yield_potential']:.1f} t/ha")
         
-        # Graphique combiné
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6))
+        st.markdown("---")
         
-        # NDVI
-        ax1.plot(st.session_state.ndvi_data['date'], 
-                st.session_state.ndvi_data['ndvi'], 
-                color='green', linewidth=2, marker='o')
-        ax1.fill_between(st.session_state.ndvi_data['date'], 
-                         st.session_state.ndvi_data['ndvi'], 
-                         alpha=0.3, color='green')
-        ax1.set_ylabel('NDVI', fontsize=12)
-        ax1.set_title('Évolution de la vigueur végétale (NDVI)', fontsize=14, fontweight='bold')
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim([0, 1])
+        # Graphiques combinés
+        col_graph1, col_graph2 = st.columns(2)
         
-        # Climat
-        ax2_temp = ax2.twinx()
-        ax2.bar(st.session_state.climate_data['date'], 
-               st.session_state.climate_data['rain'], 
-               color='blue', alpha=0.4, label='Pluie (mm)')
-        ax2_temp.plot(st.session_state.climate_data['date'], 
-                     st.session_state.climate_data['temp_mean'], 
-                     color='red', linewidth=2, label='Température (°C)')
-        
-        ax2.set_ylabel('Pluie (mm)', fontsize=12, color='blue')
-        ax2_temp.set_ylabel('Température (°C)', fontsize=12, color='red')
-        ax2.set_xlabel('Date', fontsize=12)
-        ax2.tick_params(axis='y', labelcolor='blue')
-        ax2_temp.tick_params(axis='y', labelcolor='red')
-        ax2.legend(loc='upper left')
-        ax2_temp.legend(loc='upper right')
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-    else:
-        st.info("👆 Cliquez sur 'Charger les données' dans la barre latérale pour commencer")
-
-# --------------------
-# ONGLET CARTE
-# --------------------
-with tabs[1]:
-    st.subheader("🗺️ Carte Interactive")
-    
-    if use_manual:
-        center = [manual_lat, manual_lon]
-    elif st.session_state.gdf is not None:
-        center = [st.session_state.gdf.geometry.centroid.y.mean(), 
-                 st.session_state.gdf.geometry.centroid.x.mean()]
-    else:
-        center = [14.6937, -17.4441]  # Dakar par défaut
-    
-    m = folium.Map(location=center, zoom_start=10, tiles="OpenStreetMap")
-    m.add_child(MeasureControl())
-    
-    # Ajouter zone importée
-    if st.session_state.gdf is not None:
-        folium.GeoJson(
-            st.session_state.gdf,
-            style_function=lambda x: {
-                'fillColor': '#228B22',
-                'color': '#006400',
-                'weight': 2,
-                'fillOpacity': 0.4
-            },
-            tooltip="Zone d'analyse"
-        ).add_to(m)
-    
-    # Ajouter marqueur point manuel
-    if use_manual:
-        folium.Marker(
-            [manual_lat, manual_lon],
-            popup=f"Point d'analyse<br>Lat: {manual_lat}<br>Lon: {manual_lon}",
-            icon=folium.Icon(color='red', icon='info-sign')
-        ).add_to(m)
-    
-    # Outil de dessin
-    draw = Draw(export=True)
-    draw.add_to(m)
-    
-    map_data = st_folium(m, height=500, width=None)
-
-# --------------------
-# ONGLET NDVI
-# --------------------
-with tabs[2]:
-    st.subheader("🛰️ Analyse NDVI (Indice de Végétation)")
-    
-    if st.session_state.ndvi_data is not None:
-        df = st.session_state.ndvi_data
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.plot(df['date'], df['ndvi'], color='darkgreen', linewidth=2, marker='o')
-            ax.fill_between(df['date'], df['ndvi'], alpha=0.3, color='green')
-            ax.axhline(y=0.6, color='orange', linestyle='--', label='Seuil optimal')
-            ax.axhline(y=0.3, color='red', linestyle='--', label='Seuil stress')
-            ax.set_ylabel('NDVI', fontsize=12)
-            ax.set_xlabel('Date', fontsize=12)
-            ax.set_title('Évolution temporelle du NDVI', fontsize=14, fontweight='bold')
-            ax.legend()
+        with col_graph1:
+            # NDVI Evolution
+            fig_ndvi, ax = plt.subplots(figsize=(8, 5))
+            ax.plot(st.session_state.satellite_data['date'], 
+                   st.session_state.satellite_data['ndvi_mean'],
+                   'o-', color='darkgreen', linewidth=2, markersize=6, label='NDVI')
+            ax.fill_between(st.session_state.satellite_data['date'],
+                           st.session_state.satellite_data['ndvi_min'],
+                           st.session_state.satellite_data['ndvi_max'],
+                           alpha=0.2, color='green', label='Plage NDVI')
+            ax.axhline(0.6, color='orange', linestyle='--', alpha=0.7, label='Seuil optimal')
+            ax.axhline(0.3, color='red', linestyle='--', alpha=0.7, label='Seuil stress')
+            ax.set_ylabel('NDVI', fontsize=11)
+            ax.set_title('Évolution de la Vigueur Végétale', fontsize=13, fontweight='bold')
+            ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3)
             ax.set_ylim([0, 1])
-            st.pyplot(fig)
+            plt.xticks(rotation=30)
+            st.pyplot(fig_ndvi)
         
-        with col2:
-            st.markdown("### Interprétation")
-            ndvi_mean = df['ndvi'].mean()
+        with col_graph2:
+            # Climat
+            fig_clim, ax1 = plt.subplots(figsize=(8, 5))
+            ax2 = ax1.twinx()
             
-            if ndvi_mean > 0.6:
-                st.success("✅ **Excellente vigueur végétale**")
-                st.write("La culture se développe très bien.")
-            elif ndvi_mean > 0.4:
-                st.warning("⚠️ **Vigueur modérée**")
-                st.write("La culture se développe correctement mais peut être améliorée.")
+            ax1.bar(st.session_state.climate_data['date'],
+                   st.session_state.climate_data['rain'],
+                   color='steelblue', alpha=0.6, label='Pluie (mm)')
+            ax2.plot(st.session_state.climate_data['date'],
+                    st.session_state.climate_data['temp_mean'],
+                    color='orangered', linewidth=2.5, label='Température (°C)')
+            
+            ax1.set_ylabel('Précipitations (mm)', color='steelblue', fontsize=11)
+            ax2.set_ylabel('Température (°C)', color='orangered', fontsize=11)
+            ax1.set_title('Conditions Climatiques', fontsize=13, fontweight='bold')
+            ax1.legend(loc='upper left', fontsize=9)
+            ax2.legend(loc='upper right', fontsize=9)
+            ax1.grid(True, alpha=0.3)
+            plt.xticks(rotation=30)
+            st.pyplot(fig_clim)
+        
+        # Analyse rapide
+        st.markdown("### 🔍 Analyse Rapide")
+        
+        col_a1, col_a2, col_a3 = st.columns(3)
+        
+        with col_a1:
+            if metrics['ndvi_mean'] > 0.6:
+                st.markdown('<div class="success-box">✅ <b>Vigueur végétale excellente</b><br>La culture se développe très bien.</div>', 
+                           unsafe_allow_html=True)
+            elif metrics['ndvi_mean'] > 0.4:
+                st.markdown('<div class="alert-box">⚠️ <b>Vigueur modérée</b><br>Surveillance recommandée.</div>', 
+                           unsafe_allow_html=True)
             else:
-                st.error("❌ **Stress végétal détecté**")
-                st.write("La culture montre des signes de stress.")
-            
-            st.markdown("### Statistiques")
-            st.write(f"**NDVI moyen:** {ndvi_mean:.3f}")
-            st.write(f"**NDVI max:** {df['ndvi'].max():.3f}")
-            st.write(f"**NDVI min:** {df['ndvi'].min():.3f}")
-            st.write(f"**Écart-type:** {df['ndvi'].std():.3f}")
-    else:
-        st.info("Chargez d'abord les données")
-
-# --------------------
-# ONGLET CLIMAT
-# --------------------
-with tabs[3]:
-    st.subheader("🌦️ Analyse Climatique")
-    
-    if st.session_state.climate_data is not None:
-        df = st.session_state.climate_data
+                st.markdown('<div class="alert-box" style="border-left: 4px solid #DC3545; background: #F8D7DA;">❌ <b>Stress végétal détecté</b><br>Action urgente nécessaire.</div>', 
+                           unsafe_allow_html=True)
         
-        # Graphique température
-        fig1, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.fill_between(df['date'], df['temp_min'], df['temp_max'], 
-                         color='lightcoral', alpha=0.3, label='Plage de température')
-        ax1.plot(df['date'], df['temp_mean'], color='red', linewidth=2, label='Température moyenne')
-        ax1.set_ylabel('Température (°C)', fontsize=12)
-        ax1.set_title('Évolution des températures', fontsize=14, fontweight='bold')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        st.pyplot(fig1)
-        
-        # Graphique précipitations
-        fig2, ax2 = plt.subplots(figsize=(12, 4))
-        ax2.bar(df['date'], df['rain'], color='blue', alpha=0.6)
-        ax2.set_ylabel('Précipitation (mm)', fontsize=12)
-        ax2.set_xlabel('Date', fontsize=12)
-        ax2.set_title('Précipitations journalières', fontsize=14, fontweight='bold')
-        ax2.grid(True, alpha=0.3, axis='y')
-        st.pyplot(fig2)
-        
-        # Statistiques
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🌡️ Temp. Moyenne", f"{df['temp_mean'].mean():.1f}°C")
-            st.metric("🔥 Temp. Max", f"{df['temp_max'].max():.1f}°C")
-        with col2:
-            st.metric("💧 Pluie Totale", f"{df['rain'].sum():.0f} mm")
-            st.metric("☔ Pluie Max/jour", f"{df['rain'].max():.1f} mm")
-        with col3:
-            st.metric("📅 Jours de pluie", f"{(df['rain'] > 1).sum()} jours")
-            st.metric("💦 Pluie Moyenne", f"{df['rain'].mean():.1f} mm/jour")
-    else:
-        st.info("Chargez d'abord les données")
-
-# --------------------
-# ONGLET ANALYSE IA
-# --------------------
-with tabs[4]:
-    st.subheader("🤖 Analyse et Recommandations par IA")
-    
-    if st.session_state.climate_data is not None and st.session_state.ndvi_data is not None:
-        metrics = calculate_metrics(st.session_state.climate_data, st.session_state.ndvi_data)
-        
-        if st.button("🚀 Générer l'analyse IA", type="primary"):
-            with st.spinner("🤖 Claude analyse vos données..."):
-                # Préparer les données pour l'IA
-                ndvi_series = ", ".join([f"{row['date'].strftime('%Y-%m-%d')}: {row['ndvi']:.2f}" 
-                                        for _, row in st.session_state.ndvi_data.iterrows()])
-                
-                prompt = f"""Tu es un expert en agronomie, climatologie et télédétection. Analyse cette parcelle agricole et fournis un diagnostic détaillé.
-
-INFORMATIONS DE LA PARCELLE :
-- Culture : {culture}
-- Période d'analyse : {start_date} à {end_date}
-- NDVI moyen : {metrics['ndvi_mean']:.3f}
-- Série temporelle NDVI : {ndvi_series}
-- Température moyenne : {metrics['temp_mean']:.1f} °C
-- Température min-max : {metrics['temp_min']:.1f} - {metrics['temp_max']:.1f} °C
-- Pluviométrie totale : {metrics['rain_total']:.0f} mm
-- Pluviométrie moyenne : {metrics['rain_mean']:.1f} mm/jour
-- Rendement potentiel estimé : {metrics['yield_potential']:.1f} t/ha
-- Zone géographique : Sénégal (contexte sahélien)
-
-Fournis une analyse structurée au format JSON avec cette structure :
-{{
-  "diagnostic": {{
-    "vigueur": "Description de la vigueur végétative basée sur le NDVI",
-    "stress": "Identification des stress climatiques (hydrique, température, etc.)",
-    "etat_general": "État général de la culture et perspectives"
-  }},
-  "recommandations": [
-    {{
-      "categorie": "Catégorie (Semis, Irrigation, Fertilisation, etc.)",
-      "conseil": "Conseil pratique et actionnable",
-      "explication": "Explication scientifique simple du pourquoi",
-      "priorite": "haute/moyenne/basse"
-    }}
-  ],
-  "alertes": [
-    {{
-      "type": "Type d'alerte",
-      "message": "Description de l'alerte",
-      "action": "Action immédiate recommandée"
-    }}
-  ],
-  "suivi": {{
-    "frequence": "Fréquence de monitoring recommandée",
-    "indicateurs": ["Liste des indicateurs clés à surveiller"]
-  }}
-}}
-
-Adapte les conseils au contexte sahélien et rends-les compréhensibles pour un agriculteur. Réponds UNIQUEMENT avec le JSON."""
-
-                try:
-                    # Appel API Anthropic
-                    response = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={"Content-Type": "application/json"},
-                        json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 4000,
-                            "messages": [{"role": "user", "content": prompt}]
-                        },
-                        timeout=60
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        text_content = "".join([item['text'] for item in data['content'] if item['type'] == 'text'])
-                        clean_text = text_content.strip().replace('```json', '').replace('```', '')
-                        analysis = json.loads(clean_text)
-                        st.session_state.analysis_result = analysis
-                    else:
-                        st.error(f"Erreur API: {response.status_code}")
-                        analysis = None
-                except Exception as e:
-                    st.error(f"Erreur lors de l'analyse: {e}")
-                    analysis = None
-        
-        # Afficher les résultats
-        if st.session_state.analysis_result:
-            analysis = st.session_state.analysis_result
-            
-            # Diagnostic
-            st.markdown("### 📋 Diagnostic")
-            diag_col1, diag_col2 = st.columns(2)
-            with diag_col1:
-                st.info(f"**Vigueur végétative:**\n\n{analysis['diagnostic']['vigueur']}")
-            with diag_col2:
-                st.warning(f"**Stress identifiés:**\n\n{analysis['diagnostic']['stress']}")
-            
-            st.success(f"**État général:**\n\n{analysis['diagnostic']['etat_general']}")
-            
-            # Alertes
-            if analysis.get('alertes'):
-                st.markdown("### ⚠️ Alertes")
-                for alerte in analysis['alertes']:
-                    with st.expander(f"🚨 {alerte['type']}", expanded=True):
-                        st.write(alerte['message'])
-                        st.markdown(f"**Action:** {alerte['action']}")
-            
-            # Recommandations
-            st.markdown("### 💡 Recommandations")
-            for rec in analysis['recommandations']:
-                priority_color = {
-                    'haute': '🔴',
-                    'moyenne': '🟠',
-                    'basse': '🟢'
-                }.get(rec['priorite'], '⚪')
-                
-                with st.expander(f"{priority_color} {rec['categorie']} - Priorité {rec['priorite']}", 
-                               expanded=(rec['priorite'] == 'haute')):
-                    st.markdown(f"**Conseil:** {rec['conseil']}")
-                    st.markdown(f"**Pourquoi:** {rec['explication']}")
-            
-            # Plan de suivi
-            st.markdown("### 📅 Plan de Suivi")
-            st.info(f"**Fréquence:** {analysis['suivi']['frequence']}")
-            st.write("**Indicateurs à surveiller:**")
-            for ind in analysis['suivi']['indicateurs']:
-                st.write(f"• {ind}")
-    else:
-        st.info("Chargez d'abord les données pour générer une analyse")
-
-# --------------------
-# ONGLET RAPPORT
-# --------------------
-with tabs[5]:
-    st.subheader("📄 Génération de Rapport")
-    
-    if st.session_state.climate_data is not None:
-        st.write("Fonctionnalité de génération PDF en cours de développement")
-        
-        if st.button("📥 Télécharger les données CSV"):
-            # Export CSV des données
-            csv_climate = st.session_state.climate_data.to_csv(index=False)
-            st.download_button(
-                "Télécharger données climatiques",
-                csv_climate,
-                "climate_data.csv",
-                "text/csv"
-            )
-            
-            if st.session_state.ndvi_data is not None:
-                csv_ndvi = st.session_state.ndvi_data.to_csv(index=False)
-                st.download_button(
-                    "Télécharger données NDVI",
-                    csv_ndvi,
-                    "ndvi_data.csv",
-                    "text/csv"
-                )
-    else:
-        st.info("Chargez d'abord les données")
-
-# Footer
-st.markdown("---")
-st.markdown("🌍 **AgriSight** - Analyse agricole intelligente par télédétection et IA | Optimisé pour Streamlit Cloud")
+        with col_a2:
+            if metrics['rain_total'] < 200:
+                st.markdown('<div class="alert-box" style="border-left: 4px solid #DC3545; background: #F8D7DA;">💧 <b>Stress hydrique sévère</b><br>Irrigation recommandée.</div>', 
+                           unsafe_allow_html=True)
+            elif metrics['rain_total'] < 350:
+                st.markdown('<div class="alert-box">💧 <b>Pluviométrie limite</b><br>Surveiller l\'humidité du sol.</div>', 
+                           unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="success-box">💧 <b>Pluviométrie adéquate</b><br>Bon approvisionnement en eau.</div>', 
+                           unsafe_allow_html=True)
