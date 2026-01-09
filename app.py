@@ -1,28 +1,8 @@
 # ============================================================
-# AGRISIGHT – APPLICATION AGRO-CLIMATIQUE & NDVI (VERSION COMPLETE)
-# NDVI Sentinel-2 + Climat NASA POWER + Diagnostic cultures
-# Version STABLE – Streamlit Cloud compatible (FREE & OPEN DATA)
+# AGRISIGHT – DASHBOARD AVANCEE
+# Version Streamlit interactive avec onglets : Carte, NDVI, Climat, Rendement, PDF
 # ============================================================
 
-# --------------------
-# DEPENDANCES (requirements.txt)
-# --------------------
-# streamlit
-# geopandas
-# pandas
-# numpy
-# shapely
-# folium
-# streamlit-folium
-# requests
-# pystac-client
-# planetary-computer
-# rasterio
-# matplotlib
-
-# --------------------
-# IMPORTS
-# --------------------
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
@@ -31,90 +11,73 @@ import requests
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, mapping
-from datetime import date
-import random
+from datetime import date, timedelta
+import rasterio
 import matplotlib.pyplot as plt
-
+from fpdf import FPDF
+import random
 from pystac_client import Client
 import planetary_computer as pc
-import rasterio
 
 # --------------------
-# CONFIG STREAMLIT
+# CONFIG
 # --------------------
-st.set_page_config(page_title="AgriSight – Agro-climat & NDVI", layout="wide")
-st.title("🌾 AgriSight – Analyse agro-climatique & végétative")
-st.caption("Données open : NASA POWER & Sentinel-2 | Analyse spatiale agrégée")
+st.set_page_config(page_title="AgriSight Dashboard", layout="wide")
+st.title("🌾 AgriSight – Dashboard interactif avancé")
 
-# ============================================================
-# SIDEBAR – PARAMETRES
-# ============================================================
-st.sidebar.header("📂 Zone & paramètres")
+# --------------------
+# SIDEBAR
+# --------------------
+st.sidebar.header("📂 Paramètres")
+uploaded_file = st.sidebar.file_uploader("Importer une zone (GeoJSON ou SHP zip)", type=["geojson", "zip"])
+start_date = st.sidebar.date_input("Date de début", date(2023,6,1))
+end_date = st.sidebar.date_input("Date de fin", date(2023,10,31))
+culture = st.sidebar.selectbox("Type de culture", ["Mil", "Sorgho", "Maïs", "Arachide", "Papayer"])
 
-uploaded_file = st.sidebar.file_uploader(
-    "Importer une zone (GeoJSON ou SHP zippé)",
-    type=["geojson", "zip"]
-)
-
-start_date = st.sidebar.date_input("Date de début", date(2023, 6, 1))
-end_date = st.sidebar.date_input("Date de fin", date(2023, 10, 31))
-
-culture = st.sidebar.selectbox(
-    "Type de culture",
-    ["Mil", "Sorgho", "Maïs", "Arachide", "Papayer"]
-)
-
-# ============================================================
-# CHARGEMENT DE LA ZONE (ROBUSTE)
-# ============================================================
-
+# --------------------
+# CHARGEMENT ZONE
+# --------------------
 def load_zone(file):
-    if file is None:
-        return None
+    if file is None: return None
     gdf = gpd.read_file(file)
     return gdf.to_crs(4326)
 
 try:
     gdf = load_zone(uploaded_file)
-except Exception:
+except:
     gdf = None
 
-# ============================================================
-# CARTE INTERACTIVE (TOUJOURS AFFICHEE)
-# ============================================================
-st.subheader("🗺️ Carte interactive")
+# --------------------
+# ONGLET INTERACTIF
+# --------------------
+tabs = st.tabs(["Carte","NDVI","Climat","Rendement","PDF"])
 
-m = folium.Map(location=[14, -14], zoom_start=6, tiles="OpenStreetMap")
+# --------------------
+# Onglet Carte
+# --------------------
+with tabs[0]:
+    st.subheader("🗺️ Carte interactive")
+    m = folium.Map(location=[14,-14], zoom_start=6)
+    if gdf is not None:
+        folium.GeoJson(gdf, name="Zone").add_to(m)
+    folium.LayerControl().add_to(m)
+    st_folium(m, height=500)
 
-if gdf is not None:
-    folium.GeoJson(gdf, name="Zone d'étude").add_to(m)
-
-folium.LayerControl().add_to(m)
-st_folium(m, height=500)
-
-# ============================================================
-# ECHANTILLONNAGE SPATIAL – POINTS INTERNES
-# ============================================================
-
-def sample_points_in_polygon(geometry, n_points=5):
+# --------------------
+# Fonction échantillonnage points
+# --------------------
+def sample_points(geometry, n=5):
     minx, miny, maxx, maxy = geometry.bounds
-    points = []
-    attempts = 0
-    while len(points) < n_points and attempts < 1000:
-        p = Point(
-            random.uniform(minx, maxx),
-            random.uniform(miny, maxy)
-        )
-        if geometry.contains(p):
-            points.append(p)
-        attempts += 1
-    return points
+    pts = []
+    while len(pts)<n:
+        p = Point(random.uniform(minx,maxx), random.uniform(miny,maxy))
+        if geometry.contains(p): pts.append(p)
+    return pts
 
-# ============================================================
-# NASA POWER – EXTRACTION PAR POINT
-# ============================================================
-
-def get_nasa_power_point(lat, lon, start, end):
+# --------------------
+# NASA POWER
+# --------------------
+def nasa_power(lat, lon, start, end):
     url = (
         "https://power.larc.nasa.gov/api/temporal/daily/point"
         f"?parameters=T2M,PRECTOT"
@@ -123,208 +86,92 @@ def get_nasa_power_point(lat, lon, start, end):
     )
     r = requests.get(url)
     data = r.json()
-
-    if "properties" not in data:
-        return pd.DataFrame()
-
+    if "properties" not in data: return pd.DataFrame()
     params = data["properties"].get("parameter", {})
-    if not params:
-        return pd.DataFrame()
-
+    if not params: return pd.DataFrame()
     df = pd.DataFrame(params)
     df.index = pd.to_datetime(df.index)
-    df["lat"] = lat
-    df["lon"] = lon
+    df['lat'] = lat
+    df['lon'] = lon
     return df
 
-# ============================================================
-# CLIMAT – AGRÉGATION SPATIALE & TEMPORELLE
-# ============================================================
-st.subheader("🌦️ Données climatiques agrégées")
-
-climate_points_df = pd.DataFrame()
-climate_agg_df = pd.DataFrame()
-
-if gdf is not None:
-    point_records = []
-
-    for geom in gdf.geometry:
-        points = sample_points_in_polygon(geom, n_points=5)
-        for p in points:
-            df_p = get_nasa_power_point(p.y, p.x, start_date, end_date)
-            if not df_p.empty:
-                df_p = df_p.reset_index().rename(columns={"index": "date"})
-                point_records.append(df_p)
-
-    if point_records:
-        climate_points_df = pd.concat(point_records, ignore_index=True)
-
-        climate_agg_df = (
-            climate_points_df
-            .groupby("date")
-            .agg({
-                "T2M": ["mean", "min", "max"],
-                "PRECTOT": ["mean", "min", "max"],
-            })
-        )
-
-        st.markdown("**Aperçu – données par points (avec coordonnées)**")
-        st.dataframe(climate_points_df.head())
-
-        st.markdown("**Aperçu – données climatiques agrégées (zone)**")
-        st.dataframe(climate_agg_df.head())
-    else:
-        st.info("Aucune donnée climatique récupérée")
-else:
-    st.info("Chargez une zone pour lancer l'analyse climatique")
-
-# ============================================================
-# NDVI – SENTINEL-2 (MOYENNE ZONALE)
-# ============================================================
-st.subheader("🛰️ NDVI Sentinel-2 (moyenne zonale)")
-
-ndvi_mean = None
-
-if gdf is not None:
-    catalog = Client.open(
-        "https://planetarycomputer.microsoft.com/api/stac/v1",
-        modifier=pc.sign_inplace,
-    )
-
-    search = catalog.search(
-        collections=["sentinel-2-l2a"],
-        intersects=mapping(gdf.geometry.unary_union),
-        datetime=f"{start_date}/{end_date}",
-        query={"eo:cloud_cover": {"lt": 20}},
-    )
-
-    items = list(search.get_items())
-
-    if items:
-        item = items[0]
-        with rasterio.open(item.assets["B04"].href) as red, \
-             rasterio.open(item.assets["B08"].href) as nir:
-
-            red_arr = red.read(1).astype(float)
-            nir_arr = nir.read(1).astype(float)
-
-            ndvi = (nir_arr - red_arr) / (nir_arr + red_arr + 1e-6)
-            ndvi_mean = np.nanmean(ndvi)
-
-            st.metric("NDVI moyen", round(ndvi_mean, 3))
-
-            fig, ax = plt.subplots()
-            im = ax.imshow(ndvi, cmap="RdYlGn")
-            plt.colorbar(im, ax=ax, label="NDVI")
-            st.pyplot(fig)
-    else:
-        st.info("Aucune image Sentinel-2 disponible sur la période")
-else:
-    st.info("Chargez une zone pour calculer le NDVI")
-
-# ============================================================
-# DIAGNOSTIC AGRONOMIQUE – SYSTEME EXPERT
-# ============================================================
-st.subheader("🤖 Diagnostic agronomique")
-
-CROP_RULES = {
-    "Mil": {"rain": (300, 800), "temp": (25, 35), "ndvi": 0.35},
-    "Sorgho": {"rain": (400, 900), "temp": (24, 34), "ndvi": 0.40},
-    "Maïs": {"rain": (500, 1200), "temp": (20, 30), "ndvi": 0.45},
-    "Arachide": {"rain": (400, 1000), "temp": (22, 32), "ndvi": 0.40},
-    "Papayer": {"rain": (800, 2000), "temp": (22, 30), "ndvi": 0.50},
-}
-
-if not climate_agg_df.empty:
-    rain_total = climate_agg_df[('PRECTOT', 'mean')].sum()
-    temp_mean = climate_agg_df[('T2M', 'mean')].mean()
-
-    rules = CROP_RULES[culture]
-    diagnosis = []
-
-    if rain_total < rules['rain'][0]:
-        diagnosis.append("🌧️ Pluviométrie insuffisante – stress hydrique")
-    elif rain_total > rules['rain'][1]:
-        diagnosis.append("🌧️ Excès de pluie – risque maladies")
-    else:
-        diagnosis.append("✅ Pluviométrie favorable")
-
-    if not (rules['temp'][0] <= temp_mean <= rules['temp'][1]):
-        diagnosis.append("🌡️ Température moyenne hors plage optimale")
-    else:
-        diagnosis.append("✅ Température adaptée à la culture")
-
-    if ndvi_mean is not None:
-        if ndvi_mean < rules['ndvi']:
-            diagnosis.append("🌱 Vigueur végétative faible (NDVI bas)")
+# --------------------
+# Onglet Climat
+# --------------------
+with tabs[2]:
+    st.subheader("🌦️ Données climatiques")
+    climate_points = []
+    if gdf is not None:
+        for geom in gdf.geometry:
+            for p in sample_points(geom,5):
+                df_p = nasa_power(p.y, p.x, start_date, end_date)
+                if not df_p.empty: climate_points.append(df_p.reset_index().rename(columns={'index':'date'}))
+        if climate_points:
+            climate_points_df = pd.concat(climate_points, ignore_index=True)
+            climate_daily = climate_points_df.groupby('date').agg({'T2M':['mean','min','max'],'PRECTOT':['mean','min','max']})
+            st.line_chart(climate_daily['T2M']['mean'], use_container_width=True)
         else:
-            diagnosis.append("🌿 Bonne vigueur végétative")
+            st.info("Pas de données climatiques disponibles")
 
-    st.markdown(f"### Diagnostic pour la culture : **{culture}**")
-    for d in diagnosis:
-        st.write("-", d)
-else:
-    st.info("Diagnostic disponible après calcul climatique")
+# --------------------
+# Onglet NDVI
+# --------------------
+with tabs[1]:
+    st.subheader("🛰️ NDVI par date")
+    ndvi_timeseries = pd.DataFrame()
+    if gdf is not None:
+        catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1", modifier=pc.sign_inplace)
+        search = catalog.search(collections=["sentinel-2-l2a"], intersects=mapping(gdf.geometry.unary_union), datetime=f"{start_date}/{end_date}", query={"eo:cloud_cover":{"lt":20}})
+        items = list(search.get_items())
+        if items:
+            ndvi_list = []
+            for item in items:
+                with rasterio.open(item.assets['B04'].href) as red, rasterio.open(item.assets['B08'].href) as nir:
+                    ndvi = (nir.read(1)-red.read(1))/(nir.read(1)+red.read(1)+1e-6)
+                    ndvi_list.append({'date':pd.to_datetime(item.datetime),'ndvi_mean':np.nanmean(ndvi)})
+            ndvi_timeseries = pd.DataFrame(ndvi_list).sort_values('date')
+            st.line_chart(ndvi_timeseries.set_index('date')['ndvi_mean'])
+        else:
+            st.info("Pas d'image Sentinel-2 disponible")
 
-# ============================================================
-# RENDEMENT POTENTIEL (MODELE FAO SIMPLIFIE)
-# ============================================================
-st.subheader("🌾 Estimation du rendement potentiel")
+# --------------------
+# Onglet Rendement
+# --------------------
+with tabs[3]:
+    st.subheader("🌾 Rendement potentiel")
+    if not climate_daily.empty and not ndvi_timeseries.empty:
+        ndvi_mean = ndvi_timeseries['ndvi_mean'].mean()
+        rain_total = climate_daily['PRECTOT']['mean'].sum()
+        temp_mean = climate_daily['T2M']['mean'].mean()
+        water_factor = min(1,rain_total/600)
+        temp_factor = max(0,1-abs(temp_mean-28)/20)
+        ndvi_factor = min(1,ndvi_mean/0.6)
+        YIELD_REF = {"Mil":2.5,"Sorgho":3.0,"Maïs":6.0,"Arachide":3.5,"Papayer":40.0}
+        yield_potential = YIELD_REF[culture]*water_factor*temp_factor*ndvi_factor
+        st.metric("Rendement potentiel estimé", f"{round(yield_potential,2)} t/ha")
+        st.line_chart(pd.DataFrame({'Rendement potentiel':[yield_potential]*len(ndvi_timeseries)}, index=ndvi_timeseries['date']))
+    else:
+        st.info("Rendement disponible après extraction climat + NDVI")
 
+# --------------------
+# Onglet PDF
+# --------------------
+with tabs[4]:
+    st.subheader("📄 Rapport PDF")
+    if st.button("Générer PDF"):
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial","B",16)
+        pdf.cell(0,10,"AgriSight – Rapport avancé",0,1,'C')
+        pdf.ln(5)
+        pdf.set_font("Arial","",12)
+        pdf.cell(0,10,f"Culture : {culture}",0,1)
+        pdf.cell(0,10,f"Période : {start_date} à {end_date}",0,1)
+        if not climate_daily.empty: pdf.cell(0,10,f"Pluviométrie totale : {rain_total:.1f} mm",0,1)
+        if not ndvi_timeseries.empty: pdf.cell(0,10,f"NDVI moyen : {ndvi_mean:.2f}",0,1)
+        if 'yield_potential' in locals(): pdf.cell(0,10,f"Rendement potentiel : {round(yield_potential,2)} t/ha",0,1)
+        pdf_file = "agrisight_dashboard_rapport.pdf"
+        pdf.output(pdf_file)
+        with open(pdf_file,'rb') as f: st.download_button("📥 Télécharger PDF", f, pdf_file,"application/pdf")
 
-YIELD_REF = {
-"Mil": 2.5,
-"Sorgho": 3.0,
-"Maïs": 6.0,
-"Arachide": 3.5,
-"Papayer": 40.0
-}
-
-
-if not climate_daily.empty and ndvi_mean is not None:
-rain_total = climate_daily['PRECTOT']['mean'].sum()
-temp_mean = climate_daily['T2M']['mean'].mean()
-
-
-water_factor = min(1, rain_total / 600)
-temp_factor = max(0, 1 - abs(temp_mean - 28) / 20)
-ndvi_factor = min(1, ndvi_mean / 0.6)
-
-
-yield_potential = YIELD_REF[culture] * water_factor * temp_factor * ndvi_factor
-
-
-st.metric(
-"Rendement potentiel estimé",
-f"{round(yield_potential, 2)} t/ha"
-)
-
-
-st.caption(
-"Estimation indicative basée sur facteurs hydrique, thermique et végétatif"
-)
-else:
-st.info("Rendement disponible après climat + NDVI")
-
-
-# ============================================================
-# EXPORT
-# ============================================================
-st.subheader("📤 Export")
-
-
-if not climate_daily.empty:
-export_df = climate_daily.copy()
-export_df['Culture'] = culture
-if ndvi_mean is not None:
-export_df['NDVI_mean'] = ndvi_mean
-export_df.to_csv('agrisight_resultats.csv')
-st.download_button(
-"📥 Télécharger résultats CSV",
-export_df.to_csv().encode('utf-8'),
-"agrisight_rendement_potentiel.csv",
-"text/csv"
-)
-
-
-st.success("Analyse complète terminée – Rendement potentiel estimé")
+st.success("✅ Dashboard complet avec onglets NDVI, Climat, Rendement et PDF")
