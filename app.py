@@ -57,9 +57,25 @@ uploaded_file = st.sidebar.file_uploader(
 
 @st.cache_data
 def load_vector(file):
-    gdf = pyogrio.read_dataframe(file)
-    gdf = gdf.set_crs(4326, allow_override=True)
-    return gdf
+    # Lecture GeoJSON sans geopandas (Streamlit Cloud safe)
+    if file.name.endswith(".geojson"):
+        import json
+        data = json.load(file)
+        features = data.get("features", [])
+        geometries = [geom.shape(f["geometry"]) for f in features]
+        gdf = pd.DataFrame({"geometry": geometries})
+        gdf["geometry"] = gdf["geometry"].apply(lambda g: g)
+        gdf = gdf.set_geometry("geometry", inplace=False)
+        return gdf
+
+    # Lecture SHP zip (nécessite pyogrio + geopandas)
+    if file.name.endswith(".zip"):
+        import geopandas as gpd
+        gdf = gpd.read_file(file)
+        gdf = gdf.to_crs(4326)
+        return gdf
+
+    raise ValueError("Format non supporté")
 
 if not uploaded_file:
     st.info("Veuillez charger une zone d’étude pour commencer")
