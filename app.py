@@ -267,23 +267,64 @@ else:
     st.info("Diagnostic disponible après calcul climatique")
 
 # ============================================================
-# EXPORT DES RESULTATS
+# RENDEMENT POTENTIEL (MODELE FAO SIMPLIFIE)
 # ============================================================
-st.subheader("📤 Export des résultats")
+st.subheader("🌾 Estimation du rendement potentiel")
 
-if not climate_points_df.empty:
-    export_df = climate_points_df.copy()
-    export_df["Culture"] = culture
-    if ndvi_mean is not None:
-        export_df["NDVI_mean_zone"] = ndvi_mean
 
-    csv = export_df.to_csv(index=False).encode("utf-8")
+YIELD_REF = {
+"Mil": 2.5,
+"Sorgho": 3.0,
+"Maïs": 6.0,
+"Arachide": 3.5,
+"Papayer": 40.0
+}
 
-    st.download_button(
-        "📥 Télécharger les données climatiques (CSV)",
-        csv,
-        file_name="agrisight_climat_points.csv",
-        mime="text/csv",
-    )
 
-st.success("Analyse terminée – Application agro-climatique opérationnelle")
+if not climate_daily.empty and ndvi_mean is not None:
+rain_total = climate_daily['PRECTOT']['mean'].sum()
+temp_mean = climate_daily['T2M']['mean'].mean()
+
+
+water_factor = min(1, rain_total / 600)
+temp_factor = max(0, 1 - abs(temp_mean - 28) / 20)
+ndvi_factor = min(1, ndvi_mean / 0.6)
+
+
+yield_potential = YIELD_REF[culture] * water_factor * temp_factor * ndvi_factor
+
+
+st.metric(
+"Rendement potentiel estimé",
+f"{round(yield_potential, 2)} t/ha"
+)
+
+
+st.caption(
+"Estimation indicative basée sur facteurs hydrique, thermique et végétatif"
+)
+else:
+st.info("Rendement disponible après climat + NDVI")
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+st.subheader("📤 Export")
+
+
+if not climate_daily.empty:
+export_df = climate_daily.copy()
+export_df['Culture'] = culture
+if ndvi_mean is not None:
+export_df['NDVI_mean'] = ndvi_mean
+export_df.to_csv('agrisight_resultats.csv')
+st.download_button(
+"📥 Télécharger résultats CSV",
+export_df.to_csv().encode('utf-8'),
+"agrisight_rendement_potentiel.csv",
+"text/csv"
+)
+
+
+st.success("Analyse complète terminée – Rendement potentiel estimé")
