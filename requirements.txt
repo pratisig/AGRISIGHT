@@ -12,3 +12,4 @@ planetary-computer
 xarray
 stackstac
 matplotlib
+fpdf 
