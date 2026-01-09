@@ -1,6 +1,6 @@
 # ============================================================
-# AGRISIGHT – DASHBOARD AVANCEE
-# Version Streamlit interactive avec onglets : Carte, NDVI, Climat, Rendement, PDF
+# AGRISIGHT – DASHBOARD AVANCEE (VERSION CORRIGEE)
+# Prévention des erreurs si données manquantes
 # ============================================================
 
 import streamlit as st
@@ -33,6 +33,13 @@ uploaded_file = st.sidebar.file_uploader("Importer une zone (GeoJSON ou SHP zip)
 start_date = st.sidebar.date_input("Date de début", date(2023,6,1))
 end_date = st.sidebar.date_input("Date de fin", date(2023,10,31))
 culture = st.sidebar.selectbox("Type de culture", ["Mil", "Sorgho", "Maïs", "Arachide", "Papayer"])
+
+# --------------------
+# INITIALISATION VARIABLES
+# --------------------
+gdf = None
+climate_daily = pd.DataFrame()
+ndvi_timeseries = pd.DataFrame()
 
 # --------------------
 # CHARGEMENT ZONE
@@ -118,7 +125,6 @@ with tabs[2]:
 # --------------------
 with tabs[1]:
     st.subheader("🛰️ NDVI par date")
-    ndvi_timeseries = pd.DataFrame()
     if gdf is not None:
         catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1", modifier=pc.sign_inplace)
         search = catalog.search(collections=["sentinel-2-l2a"], intersects=mapping(gdf.geometry.unary_union), datetime=f"{start_date}/{end_date}", query={"eo:cloud_cover":{"lt":20}})
