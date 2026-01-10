@@ -601,23 +601,36 @@ with tabs[1]:
     else:
         st.info("👆 Configurez les paramètres et lancez l'analyse")
 
+# --- EXTRAIT CORRIGÉ : PARTIES AVEC ERREURS D’INDENTATION ---
+
 # --------------------
 # ONGLET 3: NDVI
 # --------------------
 with tabs[2]:
     st.subheader("🛰️ Analyse NDVI Détaillée")
-    
+
     if st.session_state.satellite_data is not None:
         df_sat = st.session_state.satellite_data
-        
+
         col1, col2 = st.columns([2.5, 1.5])
-        
+
         with col1:
             fig, ax = plt.subplots(figsize=(11, 6))
-            ax.plot(df_sat['date'], df_sat['ndvi_mean'], 'o-',
-                   color='darkgreen', linewidth=2.5, markersize=7)
-            ax.fill_between(df_sat['date'], df_sat['ndvi_min'], df_sat['ndvi_max'],
-                           alpha=0.25, color='green')
+            ax.plot(
+                df_sat['date'],
+                df_sat['ndvi_mean'],
+                'o-',
+                color='darkgreen',
+                linewidth=2.5,
+                markersize=7
+            )
+            ax.fill_between(
+                df_sat['date'],
+                df_sat['ndvi_min'],
+                df_sat['ndvi_max'],
+                alpha=0.25,
+                color='green'
+            )
             ax.axhline(0.7, color='darkgreen', linestyle=':', alpha=0.6, label='Excellent')
             ax.axhline(0.5, color='orange', linestyle=':', alpha=0.6, label='Bon')
             ax.axhline(0.3, color='red', linestyle=':', alpha=0.6, label='Stress')
@@ -626,30 +639,112 @@ with tabs[2]:
             ax.legend()
             ax.grid(True, alpha=0.3)
             ax.set_ylim([0, 1])
-            plt.xticks(rotation =30)
-				st.pyplot(fig)
-with col2:
-        st.markdown("### 📊 Statistiques")
-        ndvi_mean = df_sat['ndvi_mean'].mean()
-        st.metric("Moyenne", f"{ndvi_mean:.3f}")
-        st.metric("Max", f"{df_sat['ndvi_mean'].max():.3f}")
-        st.metric("Min", f"{df_sat['ndvi_mean'].min():.3f}")
-        st.metric("Écart-type", f"{df_sat['ndvi_mean'].std():.3f}")
-        
-        st.markdown("---")
-        st.markdown("### 🔬 Interprétation")
-        
-        if ndvi_mean > 0.6:
-            st.success("✅ **Excellente santé**")
-            st.write("Croissance optimale")
-        elif ndvi_mean > 0.4:
-            st.warning("⚠️ **État modéré**")
-            st.write("Surveillance nécessaire")
-        else:
-            st.error("❌ **Stress détecté**")
-            st.write("Action urgente requise")
-else:
-    st.info("Chargez d'abord les données")		
+            plt.xticks(rotation=30)
+            st.pyplot(fig)
+
+        with col2:
+            st.markdown("### 📊 Statistiques")
+            ndvi_mean = df_sat['ndvi_mean'].mean()
+            st.metric("Moyenne", f"{ndvi_mean:.3f}")
+            st.metric("Max", f"{df_sat['ndvi_mean'].max():.3f}")
+            st.metric("Min", f"{df_sat['ndvi_mean'].min():.3f}")
+            st.metric("Écart-type", f"{df_sat['ndvi_mean'].std():.3f}")
+
+            st.markdown("---")
+            st.markdown("### 🔬 Interprétation")
+
+            if ndvi_mean > 0.6:
+                st.success("✅ **Excellente santé**")
+                st.write("Croissance optimale")
+            elif ndvi_mean > 0.4:
+                st.warning("⚠️ **État modéré**")
+                st.write("Surveillance nécessaire")
+            else:
+                st.error("❌ **Stress détecté**")
+                st.write("Action urgente requise")
+    else:
+        st.info("Chargez d'abord les données")
+
+
+# --------------------
+# ONGLET 4: CLIMAT
+# --------------------
+with tabs[3]:
+    st.subheader("🌦️ Analyse Climatique")
+
+    if st.session_state.climate_data is not None:
+        df_clim = st.session_state.climate_data
+
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+
+        # Températures
+        axes[0].fill_between(
+            df_clim['date'],
+            df_clim['temp_min'],
+            df_clim['temp_max'],
+            alpha=0.3,
+            color='coral',
+            label='Plage'
+        )
+        axes[0].plot(
+            df_clim['date'],
+            df_clim['temp_mean'],
+            color='red',
+            linewidth=2,
+            label='Moyenne'
+        )
+        axes[0].set_ylabel('Température (°C)', fontweight='bold')
+        axes[0].set_title('Températures', fontweight='bold')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # Pluie
+        axes[1].bar(
+            df_clim['date'],
+            df_clim['rain'],
+            color='dodgerblue',
+            alpha=0.7
+        )
+        axes[1].axhline(
+            df_clim['rain'].mean(),
+            color='navy',
+            linestyle='--',
+            label=f"Moyenne: {df_clim['rain'].mean():.1f} mm"
+        )
+        axes[1].set_ylabel('Pluie (mm)', fontweight='bold')
+        axes[1].set_xlabel('Date')
+        axes[1].set_title('Précipitations', fontweight='bold')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3, axis='y')
+
+        plt.xticks(rotation=30)
+        plt.tight_layout()
+        st.pyplot(fig)
+
+        st.markdown("### 📈 Statistiques Climatiques")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**🌡️ Températures**")
+            st.metric("Moyenne", f"{df_clim['temp_mean'].mean():.1f}°C")
+            st.metric("Min absolue", f"{df_clim['temp_min'].min():.1f}°C")
+            st.metric("Max absolue", f"{df_clim['temp_max'].max():.1f}°C")
+
+        with col2:
+            st.markdown("**💧 Précipitations**")
+            st.metric("Cumul total", f"{df_clim['rain'].sum():.0f} mm")
+            st.metric("Moyenne/jour", f"{df_clim['rain'].mean():.1f} mm")
+            st.metric("Max/jour", f"{df_clim['rain'].max():.1f} mm")
+
+        with col3:
+            st.markdown("**📊 Indices**")
+            st.metric("Jours pluie (>1mm)", f"{(df_clim['rain'] > 1).sum()}")
+            st.metric("Jours >35°C", f"{(df_clim['temp_max'] > 35).sum()}")
+            st.metric("Jours secs", f"{(df_clim['rain'] < 1).sum()}")
+    else:
+        st.info("Chargez d'abord les données")
+		
 with tabs[3]:
 st.subheader("🌦️ Analyse Climatique")
 if st.session_state.climate_data is not None:
