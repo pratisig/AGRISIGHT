@@ -704,7 +704,7 @@ ANALYSE:
 Réponds en français, précis sur doses et périodes."""
 
                 analysis_text = None
-                if gemini_key:AIzaSyBZ4494NUEL_N13soCCIgCfIrMqn2jxoD8
+                if gemini_key:
                     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={gemini_key}"
                     try:
                         response = requests.post(
