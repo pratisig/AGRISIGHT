@@ -298,7 +298,6 @@ def generate_crop_recommendations(metrics, culture, forecast_df=None):
 # Onglets
 tabs = st.tabs(["🗺️ Carte", "📊 Dashboard", "🛰️ Indices", "🌦️ Climat", 
                 "🔮 Prévisions", "🤖 IA Multi-Cultures", "📄 Rapport"])
-
 # ONGLET 1: CARTE
 with tabs[0]:
     st.subheader("🗺️ Définir la Zone d'Étude")
