@@ -627,7 +627,7 @@ with tabs[2]:
             ax.grid(True, alpha=0.3)
             ax.set_ylim([0, 1])
             plt.xticks(rotation =30)
-								st.pyplot(fig)
+			st.pyplot(fig)
 with col2:
         st.markdown("### 📊 Statistiques")
         ndvi_mean = df_sat['ndvi_mean'].mean()
