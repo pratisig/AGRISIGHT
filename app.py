@@ -1,10 +1,191 @@
-def get_climate_nasa_multi_points(points_list, start, end):
+import streamlit as st
+import geopandas as gpd
+import pandas as pd
+import numpy as np
+import requests
+import folium
+from folium.plugins import Draw, MeasureControl, MarkerCluster
+from streamlit_folium import st_folium
+from shapely.geometry import Point, Polygon, mapping, shape, MultiPoint
+from shapely.ops import unary_union
+from datetime import date, datetime, timedelta
+import matplotlib.pyplot as plt
+import seaborn as sns
+from io import BytesIO
+import json
+from matplotlib.backends.backend_pdf import PdfPages
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+# Configuration
+st.set_page_config(page_title="AgriSight Pro", layout="wide", page_icon="🌾")
+
+# CSS personnalisé
+st.markdown("""
+<style>
+    .big-metric {font-size: 2em; font-weight: bold; color: #2E7D32;}
+    .alert-box {background: #FFF3CD; padding: 15px; border-radius: 8px; border-left: 4px solid #FFC107;}
+    .success-box {background: #D4EDDA; padding: 15px; border-radius: 8px; border-left: 4px solid #28A745;}
+    .info-box {background: #D1ECF1; padding: 15px; border-radius: 8px; border-left: 4px solid #17A2B8;}
+    .danger-box {background: #F8D7DA; padding: 15px; border-radius: 8px; border-left: 4px solid #DC3545;}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🌾 AgriSight Pro - Analyse Agro-climatique Avancée")
+st.markdown("*Plateforme d'analyse multi-indices par télédétection et IA pour l'agriculture de précision*")
+
+# API Keys (intégrées)
+AGRO_API_KEY = '28641235f2b024b5f45f97df45c6a0d5'
+GEMINI_API_KEY = 'AIzaSyBZ4494NUEL_N13soCCIgCfIrMqn2jxoD8'
+OPENWEATHER_KEY = 'b06c034b4894d54fc512f9cd30b61a4a'
+
+# Sidebar
+st.sidebar.header("⚙️ Configuration")
+st.sidebar.markdown("---")
+
+with st.sidebar.expander("🔑 Clés API", expanded=False):
+    st.success("✅ Clé Google Gemini configurée")
+    st.success("✅ Clé OpenWeather configurée")
+    st.success("✅ Clé Agromonitoring configurée")
+    st.info("💡 Toutes les clés API sont intégrées et prêtes à l'emploi")
+
+st.sidebar.markdown("---")
+
+# Zone d'étude
+st.sidebar.subheader("📍 Zone d'étude")
+zone_method = st.sidebar.radio("Méthode de sélection", 
+                               ["Dessiner sur carte", "Importer GeoJSON", "Coordonnées"])
+
+uploaded_file = None
+manual_coords = None
+
+if zone_method == "Importer GeoJSON":
+    uploaded_file = st.sidebar.file_uploader("Fichier GeoJSON", type=["geojson", "json"])
+elif zone_method == "Coordonnées":
+    st.sidebar.info("Rectangle (lat/lon)")
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        lat_min = st.number_input("Lat Min", value=14.60, format="%.4f")
+        lon_min = st.number_input("Lon Min", value=-17.50, format="%.4f")
+    with col2:
+        lat_max = st.number_input("Lat Max", value=14.70, format="%.4f")
+        lon_max = st.number_input("Lon Max", value=-17.40, format="%.4f")
+    manual_coords = (lat_min, lon_min, lat_max, lon_max)
+
+# Paramètres temporels - restriction jusqu'à aujourd'hui - 10 jours
+st.sidebar.subheader("📅 Période d'analyse")
+max_end_date = date.today() - timedelta(days=10)
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    start_date = st.date_input("Début", max_end_date - timedelta(days=90), 
+                                max_value=max_end_date)
+with col2:
+    end_date = st.date_input("Fin", max_end_date, 
+                              max_value=max_end_date,
+                              min_value=start_date)
+
+# Multi-cultures
+st.sidebar.subheader("🌱 Cultures à analyser")
+cultures_disponibles = ["Mil", "Sorgho", "Maïs", "Arachide", "Riz", "Niébé", 
+                        "Manioc", "Tomate", "Oignon", "Coton", "Pastèque"]
+cultures_selectionnees = st.sidebar.multiselect(
+    "Sélectionnez une ou plusieurs cultures",
+    cultures_disponibles,
+    default=["Mil"]
+)
+
+if not cultures_selectionnees:
+    st.sidebar.error("Sélectionnez au moins une culture")
+
+zone_name = st.sidebar.text_input("📍 Nom de la zone", "Ma parcelle")
+
+# Paramètres d'échantillonnage
+st.sidebar.subheader("🔬 Échantillonnage")
+grid_size_ha = st.sidebar.slider("Taille grille (ha)", 1, 10, 5, 
+                                  help="Taille max de chaque cellule d'échantillonnage")
+
+st.sidebar.markdown("---")
+load_btn = st.sidebar.button("🚀 Lancer l'analyse", type="primary", use_container_width=True)
+
+# Session State
+if 'gdf' not in st.session_state:
+    st.session_state.gdf = None
+if 'sampling_points' not in st.session_state:
+    st.session_state.sampling_points = None
+if 'satellite_data' not in st.session_state:
+    st.session_state.satellite_data = None
+if 'climate_data' not in st.session_state:
+    st.session_state.climate_data = None
+if 'weather_forecast' not in st.session_state:
+    st.session_state.weather_forecast = None
+if 'analysis' not in st.session_state:
+    st.session_state.analysis = {}
+if 'drawn_geometry' not in st.session_state:
+    st.session_state.drawn_geometry = None
+
+# Fonctions utilitaires
+def create_polygon_from_coords(lat_min, lon_min, lat_max, lon_max):
+    coords = [
+        (lon_min, lat_min),
+        (lon_max, lat_min),
+        (lon_max, lat_max),
+        (lon_min, lat_max),
+        (lon_min, lat_min)
+    ]
+    return Polygon(coords)
+
+@st.cache_data(ttl=3600)
+def load_geojson(file_bytes):
+    try:
+        gdf = gpd.read_file(BytesIO(file_bytes))
+        return gdf.to_crs(4326)
+    except Exception as e:
+        st.error(f"Erreur lecture GeoJSON: {e}")
+        return None
+
+def geometry_to_dict(geom):
+    return mapping(geom)
+
+def dict_to_geometry(geom_dict):
+    return shape(geom_dict)
+
+def create_sampling_grid(geometry, grid_size_ha=5):
+    """Crée une grille d'échantillonnage avec cellules max de grid_size_ha"""
+    bounds = geometry.bounds
+    min_x, min_y, max_x, max_y = bounds
+    
+    # Conversion ha en degrés (approximation à l'équateur: 1 ha ≈ 0.003 deg²)
+    # Pour une grille carrée: côté ≈ sqrt(ha) * 0.003
+    cell_size = np.sqrt(grid_size_ha) * 0.003
+    
+    # Créer la grille
+    x_coords = np.arange(min_x, max_x, cell_size)
+    y_coords = np.arange(min_y, max_y, cell_size)
+    
+    points = []
+    for x in x_coords:
+        for y in y_coords:
+            # Point au centre de chaque cellule
+            point = Point(x + cell_size/2, y + cell_size/2)
+            if geometry.contains(point):
+                points.append({
+                    'geometry': point,
+                    'longitude': point.x,
+                    'latitude': point.y,
+                    'cell_id': f"C{len(points)+1}"
+                })
+    
+    return gpd.GeoDataFrame(points, crs='EPSG:4326')
+
+@st.cache_data(ttl=3600)
+def get_climate_nasa_multi_points(points_dict_list, start, end):
     """Récupère données climat pour plusieurs points"""
     results = []
     
-    for point_dict in points_list:
-        lat = point_dict['latitude']
-        lon = point_dict['longitude']
+    for point_dict in points_dict_list:
+        point = dict_to_geometry(point_dict['geometry'])
+        lat, lon = point.y, point.x
         
         url = (
             "https://power.larc.nasa.gov/api/temporal/daily/point"
@@ -45,6 +226,53 @@ def get_climate_nasa_multi_points(points_list, start, end):
         return pd.concat(results, ignore_index=True)
     return None
 
+@st.cache_data(ttl=3600)
+def get_weather_forecast(lat, lon, api_key):
+    """Récupère prévisions météo 7 jours"""
+    if not api_key:
+        return None
+    
+    url = f"http://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            return None
+        
+        data = response.json()
+        forecasts = []
+        
+        for item in data['list'][:56]:  # 7 jours (8 prévisions/jour)
+            forecasts.append({
+                'datetime': datetime.fromtimestamp(item['dt']),
+                'temp': item['main']['temp'],
+                'temp_min': item['main']['temp_min'],
+                'temp_max': item['main']['temp_max'],
+                'humidity': item['main']['humidity'],
+                'rain': item.get('rain', {}).get('3h', 0),
+                'description': item['weather'][0]['description'],
+                'wind_speed': item['wind']['speed']
+            })
+        
+        df = pd.DataFrame(forecasts)
+        df['date'] = df['datetime'].dt.date
+        
+        # Agrégation par jour
+        daily = df.groupby('date').agg({
+            'temp': 'mean',
+            'temp_min': 'min',
+            'temp_max': 'max',
+            'humidity': 'mean',
+            'rain': 'sum',
+            'wind_speed': 'mean',
+            'description': 'first'
+        }).reset_index()
+        
+        return daily
+        
+    except Exception as e:
+        st.warning(f"Erreur prévisions météo: {e}")
+        return None
 def simulate_multi_indices_data(points_list, start, end):
     """Simule données multi-indices pour chaque point d'échantillonnage"""
     dates = pd.date_range(start, end, freq='5D')
@@ -298,6 +526,7 @@ def generate_crop_recommendations(metrics, culture, forecast_df=None):
 # Onglets
 tabs = st.tabs(["🗺️ Carte", "📊 Dashboard", "🛰️ Indices", "🌦️ Climat", 
                 "🔮 Prévisions", "🤖 IA Multi-Cultures", "📄 Rapport"])
+
 # ONGLET 1: CARTE
 with tabs[0]:
     st.subheader("🗺️ Définir la Zone d'Étude")
@@ -468,16 +697,9 @@ if load_btn:
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.min.time())
     
-    # Convertir GeoDataFrame en liste de dictionnaires simples
-    points_simple_list = []
-    for idx, row in sampling_points.iterrows():
-        points_simple_list.append({
-            'cell_id': row['cell_id'],
-            'latitude': row['latitude'],
-            'longitude': row['longitude']
-        })
+    points_dict_list = sampling_points.to_dict('records')
     
-    climate_df = get_climate_nasa_multi_points(points_simple_list, start_dt, end_dt)
+    climate_df = get_climate_nasa_multi_points(points_dict_list, start_dt, end_dt)
     
     if climate_df is None or climate_df.empty:
         status_climate.error("Échec données climatiques")
@@ -491,7 +713,7 @@ if load_btn:
     # Étape 3: Indices satellitaires
     status_indices.info("Chargement indices satellitaires...")
     
-    indices_df = simulate_multi_indices_data(points_simple_list, start_date, end_date)
+    indices_df = simulate_multi_indices_data(points_dict_list, start_date, end_date)
     
     if indices_df is None or indices_df.empty:
         status_indices.error("Échec indices")
@@ -1345,15 +1567,6 @@ with tabs[4]:
                             "profondeur": "3-4 cm",
                             "dose_semences": "15-20 kg/ha"
                         },
-                        "Manioc": {
-                            "periode_semis": "Début saison pluies",
-                            "pluie_min_semis": 30,
-                            "temp_optimale": "25-30°C",
-                            "cycle": "300 jours",
-                            "espacement": "100x100 cm",
-                            "profondeur": "10-15 cm (boutures)",
-                            "dose_semences": "10000 boutures/ha"
-                        },
                         "Pastèque": {
                             "periode_semis": "Mars-Avril ou Septembre-Octobre",
                             "pluie_min_semis": 15,
@@ -1395,18 +1608,19 @@ with tabs[4]:
                         st.info(f"💡 Recommandation: Attendre des prévisions plus favorables ou prévoir irrigation post-semis")
         
     else:
-        st.info("⚙️ Les prévisions météo sont activées avec votre clé OpenWeather intégrée")
+        st.info("⚙️ Configurez votre clé OpenWeather dans la barre latérale pour activer les prévisions")
         st.markdown("""
-        ### Prévisions météorologiques activées
+        ### Comment obtenir une clé OpenWeather (gratuit):
+        1. Allez sur [openweathermap.org](https://openweathermap.org/api)
+        2. Créez un compte gratuit
+        3. Générez une clé API (plan gratuit: 1000 appels/jour)
+        4. Collez la clé dans la configuration
         
-        **Fonctionnalités disponibles:**
-        - 📅 Prévisions 7 jours
-        - 🌾 Calendrier semis optimisé
-        - 🦠 Alertes traitements phytosanitaires
-        - 💧 Planification irrigation
-        - ⚠️ Prévention risques climatiques
-        
-        Les prévisions seront chargées automatiquement lors de l'analyse.
+        **Avantages des prévisions:**
+        - Calendrier semis optimisé
+        - Alerte traitements phytosanitaires
+        - Planification irrigation
+        - Prévention risques climatiques
         """)
 # ONGLET 6: ANALYSE IA MULTI-CULTURES
 with tabs[5]:
@@ -1414,7 +1628,7 @@ with tabs[5]:
     
     if st.session_state.analysis and st.session_state.climate_data is not None:
         
-        st.info("💡 **Google Gemini** intégré et prêt à l'emploi")
+        st.info("💡 **Google Gemini** gratuit (15 req/min). [Obtenez votre clé](https://aistudio.google.com/apikey)")
         
         # Options d'analyse
         col_opt1, col_opt2 = st.columns(2)
@@ -1556,29 +1770,29 @@ IMPORTANT:
 
                     analysis_text = None
                     
-                    # Utiliser la clé Gemini intégrée
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-                    try:
-                        response = requests.post(
-                            url,
-                            headers={"Content-Type": "application/json"},
-                            json={
-                                "contents": [{"parts": [{"text": prompt}]}],
-                                "generationConfig": {
-                                    "temperature": 0.7,
-                                    "maxOutputTokens": 8192,
-                                }
-                            },
-                            timeout=90
-                        )
-                        if response.status_code == 200:
-                            data = response.json()
-                            if 'candidates' in data and len(data['candidates']) > 0:
-                                analysis_text = data['candidates'][0]['content']['parts'][0]['text']
-                        else:
-                            st.warning(f"Erreur API Gemini pour {culture}: {response.status_code}")
-                    except Exception as e:
-                        st.warning(f"Erreur connexion Gemini pour {culture}: {e}")
+                    if gemini_key:
+                        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={gemini_key}"
+                        try:
+                            response = requests.post(
+                                url,
+                                headers={"Content-Type": "application/json"},
+                                json={
+                                    "contents": [{"parts": [{"text": prompt}]}],
+                                    "generationConfig": {
+                                        "temperature": 0.7,
+                                        "maxOutputTokens": 8192,
+                                    }
+                                },
+                                timeout=90
+                            )
+                            if response.status_code == 200:
+                                data = response.json()
+                                if 'candidates' in data and len(data['candidates']) > 0:
+                                    analysis_text = data['candidates'][0]['content']['parts'][0]['text']
+                            else:
+                                st.warning(f"Erreur API Gemini pour {culture}: {response.status_code}")
+                        except Exception as e:
+                            st.warning(f"Erreur connexion Gemini pour {culture}: {e}")
                     
                     # Analyse par défaut si pas de Gemini
                     if not analysis_text:
@@ -1628,7 +1842,7 @@ IMPORTANT:
 {chr(10).join(['- ' + r for r in (recommendations['irrigation'][:2] + recommendations['diagnostic'][:2])])}
 
 ---
-*Analyse générée par IA avec Google Gemini*"""
+*Pour analyse IA approfondie, configurez votre clé Google Gemini (gratuite)*"""
                     
                     analyses_generated[culture] = analysis_text
                     time.sleep(2)  # Rate limiting
@@ -1692,7 +1906,511 @@ IMPORTANT:
                                 f"📊 Métriques {culture} (JSON)",
                                 summary_json,
                                 file_name=f"metriques_{culture}_{zone_name}_{datetime.now().strftime('%Y%m%d')}.json",
-							mime="application/json",
-							use_container_width=True,
-							key=f"dl_json_{culture}"
-							)
+                                mime="application/json",
+                                use_container_width=True,
+                                key=f"dl_json_{culture}"
+                            )
+                        
+                        with col_dl3:
+                            # Markdown complet
+                            full_md = f"""# Analyse {culture} - {zone_name}
+Date: {datetime.now().strftime('%d/%m/%Y')}
+
+{analysis_text}
+
+## Métriques Clés
+- NDVI: {metrics['ndvi_mean']:.3f}
+- Rendement: {metrics['yield_potential']:.1f} t/ha
+- Pluie: {metrics['rain_total']:.0f}mm
+- Température: {metrics['temp_mean']:.1f}°C
+"""
+                            st.download_button(
+                                f"📝 Rapport {culture} (MD)",
+                                full_md,
+                                file_name=f"rapport_{culture}_{zone_name}_{datetime.now().strftime('%Y%m%d')}.md",
+                                mime="text/markdown",
+                                use_container_width=True,
+                                key=f"dl_md_{culture}"
+                            )
+    
+    else:
+        st.info("Lancez d'abord l'analyse complète")
+# ONGLET 7: RAPPORT PDF
+with tabs[6]:
+    st.subheader("📄 Rapport PDF Complet Multi-Cultures")
+    
+    if st.session_state.climate_data is not None and st.session_state.satellite_data is not None:
+        
+        st.markdown("""
+        **Contenu du rapport PDF:**
+        - 🗺️ Carte de la zone avec points d'échantillonnage
+        - 📊 Graphiques multi-indices (NDVI, EVI, NDWI, LAI)
+        - 🌦️ Données climatiques détaillées
+        - 🔮 Prévisions météorologiques (si disponibles)
+        - 🤖 Analyses IA complètes pour chaque culture
+        - 📈 Tableaux synthétiques et coordonnées GPS
+        - 💡 Recommandations détaillées
+        """)
+        
+        # Options rapport
+        col_opt1, col_opt2 = st.columns(2)
+        
+        with col_opt1:
+            include_map = st.checkbox("Inclure carte détaillée", value=True)
+            include_ai = st.checkbox("Inclure analyses IA", value=True)
+        
+        with col_opt2:
+            include_coords = st.checkbox("Inclure tableau coordonnées", value=True)
+            include_forecast = st.checkbox("Inclure prévisions", 
+                                          value=st.session_state.weather_forecast is not None)
+        
+        if st.button("📄 Générer Rapport PDF Complet", type="primary", use_container_width=True):
+            with st.spinner("📝 Génération du rapport PDF..."):
+                try:
+                    def generate_comprehensive_pdf():
+                        buffer = BytesIO()
+                        
+                        with PdfPages(buffer) as pdf:
+                            
+                            # PAGE 1: Page de garde
+                            fig = plt.figure(figsize=(8.5, 11))
+                            fig.patch.set_facecolor('white')
+                            ax = fig.add_subplot(111)
+                            ax.axis('off')
+                            
+                            # Titre principal
+                            ax.text(0.5, 0.85, 'RAPPORT AGRO-CLIMATIQUE', 
+                                   ha='center', fontsize=24, fontweight='bold', 
+                                   color='#2E7D32')
+                            ax.text(0.5, 0.78, 'Analyse par Télédétection et IA', 
+                                   ha='center', fontsize=14, color='#555')
+                            
+                            # Ligne séparatrice
+                            ax.plot([0.2, 0.8], [0.75, 0.75], 'k-', linewidth=2)
+                            
+                            # Informations zone
+                            info_y = 0.68
+                            ax.text(0.5, info_y, f'Zone: {zone_name}', 
+                                   ha='center', fontsize=16, fontweight='bold')
+                            info_y -= 0.05
+                            ax.text(0.5, info_y, f'Cultures: {", ".join(cultures_selectionnees)}', 
+                                   ha='center', fontsize=12)
+                            info_y -= 0.05
+                            ax.text(0.5, info_y, f'Période: {start_date.strftime("%d/%m/%Y")} - {end_date.strftime("%d/%m/%Y")}', 
+                                   ha='center', fontsize=12)
+                            info_y -= 0.05
+                            ax.text(0.5, info_y, f'Surface: {len(st.session_state.sampling_points)} points échantillonnés', 
+                                   ha='center', fontsize=12)
+                            
+                            # Métriques clés pour première culture
+                            if cultures_selectionnees:
+                                first_culture = cultures_selectionnees[0]
+                                metrics = st.session_state.analysis[first_culture]['metrics']
+                                
+                                metrics_y = 0.50
+                                ax.text(0.5, metrics_y, 'MÉTRIQUES PRINCIPALES', 
+                                       ha='center', fontsize=14, fontweight='bold', 
+                                       color='#2E7D32')
+                                metrics_y -= 0.08
+                                
+                                col1_x, col2_x = 0.3, 0.7
+                                
+                                ax.text(col1_x, metrics_y, f'NDVI Moyen:', fontweight='bold')
+                                ax.text(col2_x, metrics_y, f'{metrics["ndvi_mean"]:.3f}')
+                                metrics_y -= 0.05
+                                
+                                ax.text(col1_x, metrics_y, f'Pluie Totale:', fontweight='bold')
+                                ax.text(col2_x, metrics_y, f'{metrics["rain_total"]:.0f} mm')
+                                metrics_y -= 0.05
+                                
+                                ax.text(col1_x, metrics_y, f'Température Moy.:', fontweight='bold')
+                                ax.text(col2_x, metrics_y, f'{metrics["temp_mean"]:.1f}°C')
+                                metrics_y -= 0.05
+                                
+                                ax.text(col1_x, metrics_y, f'Rendement Estimé:', fontweight='bold')
+                                ax.text(col2_x, metrics_y, f'{metrics["yield_potential"]:.1f} t/ha')
+                            
+                            # Footer
+                            ax.text(0.5, 0.15, 'AgriSight Pro v2.0', 
+                                   ha='center', fontsize=10, style='italic', color='#666')
+                            ax.text(0.5, 0.12, f'Généré le {datetime.now().strftime("%d/%m/%Y à %H:%M")}', 
+                                   ha='center', fontsize=9, color='#888')
+                            ax.text(0.5, 0.08, 'Télédétection • IA • Agriculture de Précision', 
+                                   ha='center', fontsize=9, color='#888')
+                            
+                            pdf.savefig(fig, bbox_inches='tight')
+                            plt.close()
+                            
+                            # PAGE 2: Carte et coordonnées
+                            if include_map and st.session_state.gdf is not None:
+                                fig = plt.figure(figsize=(8.5, 11))
+                                
+                                if include_coords and st.session_state.sampling_points is not None:
+                                    # Carte + tableau
+                                    ax_map = plt.subplot2grid((2, 1), (0, 0))
+                                    ax_table = plt.subplot2grid((2, 1), (1, 0))
+                                else:
+                                    # Carte seule
+                                    ax_map = fig.add_subplot(111)
+                                
+                                ax_map.set_title(f'Zone d\'Étude: {zone_name}', 
+                                               fontsize=14, fontweight='bold')
+                                
+                                # Plot zone
+                                gdf = st.session_state.gdf
+                                gdf.plot(ax=ax_map, facecolor='lightgreen', 
+                                        edgecolor='darkgreen', alpha=0.5, linewidth=2)
+                                
+                                # Plot points échantillonnage
+                                if st.session_state.sampling_points is not None:
+                                    points_gdf = st.session_state.sampling_points
+                                    points_gdf.plot(ax=ax_map, color='red', 
+                                                   markersize=30, alpha=0.7)
+                                    
+                                    # Annotations
+                                    for idx, row in points_gdf.iterrows():
+                                        if idx < 20:  # Limiter annotations
+                                            ax_map.annotate(row['cell_id'], 
+                                                          (row.geometry.x, row.geometry.y),
+                                                          fontsize=6, ha='center')
+                                
+                                ax_map.set_xlabel('Longitude', fontweight='bold')
+                                ax_map.set_ylabel('Latitude', fontweight='bold')
+                                ax_map.grid(True, alpha=0.3)
+                                
+                                # Tableau coordonnées
+                                if include_coords and st.session_state.sampling_points is not None:
+                                    ax_table.axis('off')
+                                    
+                                    coords_data = []
+                                    for idx, row in st.session_state.sampling_points.head(15).iterrows():
+                                        coords_data.append([
+                                            row['cell_id'],
+                                            f"{row['latitude']:.4f}",
+                                            f"{row['longitude']:.4f}"
+                                        ])
+                                    
+                                    table = ax_table.table(
+                                        cellText=coords_data,
+                                        colLabels=['Point', 'Latitude', 'Longitude'],
+                                        cellLoc='center',
+                                        loc='center',
+                                        colWidths=[0.3, 0.35, 0.35]
+                                    )
+                                    table.auto_set_font_size(False)
+                                    table.set_fontsize(8)
+                                    table.scale(1, 1.5)
+                                    
+                                    # Style header
+                                    for i in range(3):
+                                        table[(0, i)].set_facecolor('#2E7D32')
+                                        table[(0, i)].set_text_props(weight='bold', color='white')
+                                    
+                                    ax_table.set_title('Coordonnées Points d\'Échantillonnage (15 premiers)', 
+                                                      fontsize=11, fontweight='bold', pad=20)
+                                
+                                plt.tight_layout()
+                                pdf.savefig(fig, bbox_inches='tight')
+                                plt.close()
+                            
+                            # PAGES 3+: Graphiques par culture
+                            for culture in cultures_selectionnees:
+                                metrics = st.session_state.analysis[culture]['metrics']
+                                
+                                fig = plt.figure(figsize=(8.5, 11))
+                                fig.suptitle(f'Analyse {culture}', fontsize=16, fontweight='bold')
+                                
+                                # Grille 4x2
+                                gs = fig.add_gridspec(4, 2, hspace=0.4, wspace=0.3)
+                                
+                                # Info box
+                                ax_info = fig.add_subplot(gs[0, :])
+                                ax_info.axis('off')
+                                info_text = f"""Culture: {culture}  |  Rendement: {metrics['yield_potential']:.1f} t/ha  |  NDVI: {metrics['ndvi_mean']:.3f}  |  Pluie: {metrics['rain_total']:.0f}mm  |  Temp: {metrics['temp_mean']:.1f}°C"""
+                                ax_info.text(0.5, 0.5, info_text, ha='center', va='center',
+                                           fontsize=10, bbox=dict(boxstyle='round', facecolor='lightblue'))
+                                
+                                # NDVI
+                                ax1 = fig.add_subplot(gs[1, :])
+                                indices_df = st.session_state.satellite_data
+                                ndvi_temp = indices_df.groupby('date')['ndvi'].mean().reset_index()
+                                ax1.plot(ndvi_temp['date'], ndvi_temp['ndvi'], 'o-', 
+                                        color='darkgreen', linewidth=2)
+                                ax1.fill_between(ndvi_temp['date'], ndvi_temp['ndvi'], 
+                                               alpha=0.3, color='green')
+                                ax1.axhline(0.7, color='green', linestyle='--', alpha=0.5)
+                                ax1.axhline(0.5, color='orange', linestyle='--', alpha=0.5)
+                                ax1.set_ylabel('NDVI', fontweight='bold')
+                                ax1.set_title('Évolution NDVI', fontweight='bold', fontsize=11)
+                                ax1.grid(True, alpha=0.3)
+                                ax1.set_ylim([0, 1])
+                                plt.setp(ax1.xaxis.get_majorticklabels(), rotation=30, ha='right')
+                                
+                                # Température
+                                ax2 = fig.add_subplot(gs[2, 0])
+                                climate_df = st.session_state.climate_data
+                                clim_temp = climate_df.groupby('date').agg({
+                                    'temp_mean': 'mean',
+                                    'temp_min': 'min',
+                                    'temp_max': 'max'
+                                }).reset_index()
+                                ax2.fill_between(clim_temp['date'], clim_temp['temp_min'], 
+                                               clim_temp['temp_max'], alpha=0.3, color='coral')
+                                ax2.plot(clim_temp['date'], clim_temp['temp_mean'], 
+                                        color='red', linewidth=2)
+                                ax2.set_ylabel('Temp (°C)', fontweight='bold')
+                                ax2.set_title('Températures', fontweight='bold', fontsize=10)
+                                ax2.grid(True, alpha=0.3)
+                                plt.setp(ax2.xaxis.get_majorticklabels(), rotation=30, ha='right', fontsize=7)
+                                
+                                # Pluie
+                                ax3 = fig.add_subplot(gs[2, 1])
+                                rain_temp = climate_df.groupby('date')['rain'].mean().reset_index()
+                                ax3.bar(rain_temp['date'], rain_temp['rain'], 
+                                       color='dodgerblue', alpha=0.7)
+                                ax3.set_ylabel('Pluie (mm)', fontweight='bold')
+                                ax3.set_title('Précipitations', fontweight='bold', fontsize=10)
+                                ax3.grid(True, alpha=0.3, axis='y')
+                                plt.setp(ax3.xaxis.get_majorticklabels(), rotation=30, ha='right', fontsize=7)
+                                
+                                # Indices
+                                ax4 = fig.add_subplot(gs[3, 0])
+                                indices_names = ['NDVI', 'EVI', 'NDWI', 'SAVI']
+                                indices_vals = [metrics['ndvi_mean'], metrics['evi_mean'],
+                                              (metrics['ndwi_mean']+1)/2, metrics['savi_mean']]
+                                colors_bar = ['green', 'darkgreen', 'blue', 'olive']
+                                ax4.bar(indices_names, indices_vals, color=colors_bar, alpha=0.7)
+                                ax4.set_ylabel('Valeur', fontweight='bold')
+                                ax4.set_title('Indices Végétation', fontweight='bold', fontsize=10)
+                                ax4.set_ylim([0, 1])
+                                ax4.grid(True, alpha=0.3, axis='y')
+                                
+                                # Statistiques
+                                ax5 = fig.add_subplot(gs[3, 1])
+                                ax5.axis('off')
+                                stats_text = f"""LAI: {metrics['lai_mean']:.1f} m²/m²
+Humidité: {metrics['humidity_mean']:.0f}%
+Vent: {metrics['wind_mean']:.1f} m/s
+Jours pluie: {metrics['rain_days']}
+Score hydrique: {(1-metrics['water_stress']):.2f}
+Cycle: {metrics['cycle_days']} jours"""
+                                ax5.text(0.1, 0.5, stats_text, fontsize=9, 
+                                        verticalalignment='center', family='monospace')
+                                ax5.set_title('Statistiques', fontweight='bold', fontsize=10)
+                                
+                                pdf.savefig(fig, bbox_inches='tight')
+                                plt.close()
+                                
+                                # PAGE Analyse IA
+                                if include_ai and culture in st.session_state.analysis:
+                                    if 'ai_analysis' in st.session_state.analysis[culture]:
+                                        analysis_text = st.session_state.analysis[culture]['ai_analysis']
+                                        
+                                        # Découper texte
+                                        lines = analysis_text.split('\n')
+                                        pages_text = []
+                                        current_page = []
+                                        line_count = 0
+                                        
+                                        for line in lines:
+                                            if line_count > 55:  # ~55 lignes par page
+                                                pages_text.append('\n'.join(current_page))
+                                                current_page = [line]
+                                                line_count = 1
+                                            else:
+                                                current_page.append(line)
+                                                line_count += 1
+                                        
+                                        if current_page:
+                                            pages_text.append('\n'.join(current_page))
+                                        
+                                        # Générer pages
+                                        for i, page_text in enumerate(pages_text):
+                                            fig = plt.figure(figsize=(8.5, 11))
+                                            ax = fig.add_subplot(111)
+                                            ax.axis('off')
+                                            
+                                            if i == 0:
+                                                ax.text(0.5, 0.98, f'Analyse IA - {culture}', 
+                                                       ha='center', fontsize=14, fontweight='bold',
+                                                       transform=ax.transAxes)
+                                                y_start = 0.94
+                                            else:
+                                                y_start = 0.98
+                                            
+                                            ax.text(0.05, y_start, page_text, 
+                                                   fontsize=8, verticalalignment='top',
+                                                   transform=ax.transAxes, family='sans-serif',
+                                                   wrap=True)
+                                            
+                                            # Numéro page
+                                            ax.text(0.95, 0.02, f'Page {i+1}/{len(pages_text)}', 
+                                                   ha='right', fontsize=8, color='gray',
+                                                   transform=ax.transAxes)
+                                            
+                                            pdf.savefig(fig, bbox_inches='tight')
+                                            plt.close()
+                            
+                            # PAGE FINALE: Tableau synthétique multi-cultures
+                            fig = plt.figure(figsize=(8.5, 11))
+                            ax = fig.add_subplot(111)
+                            ax.axis('off')
+                            
+                            ax.text(0.5, 0.95, 'TABLEAU SYNTHÉTIQUE', 
+                                   ha='center', fontsize=16, fontweight='bold')
+                            
+                            # Préparer données tableau
+                            synth_data = []
+                            for culture in cultures_selectionnees:
+                                metrics = st.session_state.analysis[culture]['metrics']
+                                synth_data.append([
+                                    culture,
+                                    f"{metrics['ndvi_mean']:.3f}",
+                                    f"{metrics['rain_total']:.0f}",
+                                    f"{metrics['temp_mean']:.1f}",
+                                    f"{metrics['yield_potential']:.1f}",
+                                    f"{(1-metrics['water_stress'])*100:.0f}%"
+                                ])
+                            
+                            table = ax.table(
+                                cellText=synth_data,
+                                colLabels=['Culture', 'NDVI', 'Pluie\n(mm)', 'Temp\n(°C)', 
+                                          'Rend.\n(t/ha)', 'État\nHydrique'],
+                                cellLoc='center',
+                                loc='center',
+                                bbox=[0.1, 0.5, 0.8, 0.4]
+                            )
+                            table.auto_set_font_size(False)
+                            table.set_fontsize(10)
+                            table.scale(1, 2)
+                            
+                            # Style
+                            for i in range(6):
+                                table[(0, i)].set_facecolor('#2E7D32')
+                                table[(0, i)].set_text_props(weight='bold', color='white')
+                            
+                            # Légende
+                            legend_y = 0.35
+                            ax.text(0.5, legend_y, 'Légende et Seuils', 
+                                   ha='center', fontsize=12, fontweight='bold')
+                            legend_y -= 0.05
+                            ax.text(0.1, legend_y, '• NDVI > 0.6: Excellent | 0.4-0.6: Bon | < 0.4: Faible', 
+                                   fontsize=9)
+                            legend_y -= 0.04
+                            ax.text(0.1, legend_y, '• Pluie > 400mm: Suffisant | 250-400: Modéré | < 250: Insuffisant', 
+                                   fontsize=9)
+                            legend_y -= 0.04
+                            ax.text(0.1, legend_y, '• État Hydrique > 70%: Bon | 50-70%: Modéré | < 50%: Stress', 
+                                   fontsize=9)
+                            
+                            # Footer
+                            ax.text(0.5, 0.05, f'Rapport généré le {datetime.now().strftime("%d/%m/%Y à %H:%M")}', 
+                                   ha='center', fontsize=9, style='italic', color='#666')
+                            ax.text(0.5, 0.02, 'AgriSight Pro - Télédétection & IA pour Agriculture de Précision', 
+                                   ha='center', fontsize=8, color='#888')
+                            
+                            pdf.savefig(fig, bbox_inches='tight')
+                            plt.close()
+                        
+                        buffer.seek(0)
+                        return buffer
+                    
+                    # Générer PDF
+                    pdf_buffer = generate_comprehensive_pdf()
+                    
+                    st.success("✅ Rapport PDF généré avec succès!")
+                    
+                    # Bouton téléchargement
+                    st.download_button(
+                        "📥 Télécharger Rapport PDF Complet",
+                        pdf_buffer,
+                        file_name=f"rapport_complet_{zone_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                    
+                except Exception as e:
+                    st.error(f"Erreur génération PDF: {e}")
+                    st.exception(e)
+        
+        st.markdown("---")
+        
+        # Export CSV
+        st.markdown("### 💾 Exports CSV pour SIG")
+        
+        col_exp1, col_exp2, col_exp3 = st.columns(3)
+        
+        with col_exp1:
+            # Indices par point
+            if st.session_state.satellite_data is not None:
+                indices_df = st.session_state.satellite_data
+                export_indices = indices_df.groupby(['cell_id', 'latitude', 'longitude']).agg({
+                    'ndvi': ['mean', 'min', 'max', 'std'],
+                    'evi': 'mean',
+                    'ndwi': 'mean',
+                    'savi': 'mean',
+                    'lai': 'mean'
+                }).reset_index()
+                
+                export_indices.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col 
+                                         for col in export_indices.columns]
+                
+                csv_indices = export_indices.to_csv(index=False)
+                st.download_button(
+                    "🛰️ Indices Satellitaires",
+                    csv_indices,
+                    f"indices_{zone_name}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        
+        with col_exp2:
+            # Climat par point
+            if st.session_state.climate_data is not None:
+                climate_df = st.session_state.climate_data
+                export_climate = climate_df.groupby(['cell_id', 'latitude', 'longitude']).agg({
+                    'temp_mean': 'mean',
+                    'temp_min': 'min',
+                    'temp_max': 'max',
+                    'rain': 'sum',
+                    'humidity': 'mean',
+                    'wind_speed': 'mean'
+                }).reset_index()
+                
+                export_climate.columns = ['cell_id', 'latitude', 'longitude',
+                                         'temp_mean', 'temp_min', 'temp_max',
+                                         'rain_total', 'humidity_mean', 'wind_mean']
+                
+                csv_climate = export_climate.to_csv(index=False)
+                st.download_button(
+                    "🌦️ Données Climatiques",
+                    csv_climate,
+                    f"climat_{zone_name}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        
+        with col_exp3:
+            # Zone GeoJSON
+            if st.session_state.gdf is not None:
+                geojson_str = st.session_state.gdf.to_json()
+                st.download_button(
+                    "📍 Zone GeoJSON",
+                    geojson_str,
+                    f"zone_{zone_name}.geojson",
+                    mime="application/json",
+                    use_container_width=True
+                )
+    
+    else:
+        st.info("Lancez d'abord l'analyse complète")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; padding: 20px;'>
+    <b>🌾 AgriSight Pro v2.0</b> - Analyse Agricole Multi-Indices par Télédétection et IA<br>
+    <small>NDVI • EVI • NDWI • SAVI • LAI • NASA POWER • Google Gemini IA • Prévisions Météo</small><br>
+    <small style='color: #888;'>Échantillonnage spatial • Multi-cultures • Export SIG • Rapports PDF complets</small>
+</div>
+""", unsafe_allow_html=True)
