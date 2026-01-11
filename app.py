@@ -40,6 +40,7 @@ st.markdown("*Plateforme d'analyse multi-indices par télédétection et IA*")
 # API Keys
 AGRO_API_KEY = '28641235f2b024b5f45f97df45c6a0d5'
 GEMINI_API_KEY = 'AIzaSyBZ4494NUEL_N13soCCIgCfIrMqn2jxoD8'
+gemini_key = GEMINI_API_KEY
 OPENWEATHER_KEY = 'b06c034b4894d54fc512f9cd30b61a4a'
 
 # Sidebar
@@ -1151,7 +1152,7 @@ IMPORTANT:
 
                     analysis_text = None
                     
-                    if gemini_key:
+                    if GEMINI_API_KEY:
                         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
                         try:
                             response = requests.post(
