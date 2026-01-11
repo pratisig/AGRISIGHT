@@ -175,11 +175,12 @@ def create_sampling_grid(geometry, grid_size_ha=5):
     return gpd.GeoDataFrame(data, geometry=geometries, crs='EPSG:4326')
 
 @st.cache_data(ttl=3600)
-def get_climate_nasa_multi_points(points_gdf, start, end):
-    """Récupère climat pour plusieurs points"""
+def get_climate_nasa_multi_points(points_gdf_list, start, end):
+    """Récupère climat pour plusieurs points (Version compatible Cache)"""
     results = []
     
-    for idx, row in points_gdf.iterrows():
+    # On boucle sur la liste de dictionnaires (au lieu du GeoDataFrame)
+    for row in points_gdf_list:
         lat, lon = row['latitude'], row['longitude']
         
         url = (
@@ -614,7 +615,11 @@ if load_btn:
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.min.time())
     
-    climate_df = get_climate_nasa_multi_points(sampling_points, start_dt, end_dt)
+    # Conversion en liste de dicts pour éviter l'erreur UnhashableParamError
+    sampling_points_list = sampling_points[['latitude', 'longitude', 'cell_id']].to_dict('records')
+
+    # Appel avec la liste convertie
+    climate_df = get_climate_nasa_multi_points(sampling_points_list, start_dt, end_dt)
     
     if climate_df is None or climate_df.empty:
         status_climate.error("Échec climat")
